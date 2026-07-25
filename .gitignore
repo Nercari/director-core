@@ -1,0 +1,24 @@
+# Local run state — never committed
+.director/handoffs/
+.director/current-handoff.*
+.director/runs/
+.director/probes/
+.scratch/
+
+# Local settings override
+.claude/settings.local.json
+
+# Credentials — belt and braces; §14 forbids these existing at all
+.env
+.env.*
+*.key
+*.pem
+secrets/
+
+# Worktrees live as siblings, never inside
+director-core-*/
+
+# OS noise
+Thumbs.db
+desktop.ini
+.DS_Store

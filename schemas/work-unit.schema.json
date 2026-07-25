@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Nercari/director-core/schemas/work-unit.schema.json",
+  "title": "Director work unit",
+  "description": "One unit = one worktree = one branch = one pull request. Blueprint section 8.2.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "unit_id",
+    "base_commit",
+    "change_class",
+    "route",
+    "objective",
+    "acceptance_criteria",
+    "allowed_paths",
+    "behavior_check",
+    "output_contract"
+  ],
+  "properties": {
+    "run_id": { "type": "string", "minLength": 1 },
+    "unit_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "description": "Also the branch name: task/<unit-id>"
+    },
+    "base_commit": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
+    "change_class": {
+      "enum": ["green-path", "behavior"],
+      "description": "Decides auto-merge eligibility. Ambiguous means behavior."
+    },
+    "route": {
+      "enum": ["EXEC_PRIMARY", "EXEC_STRONG", "EXEC_LOCAL", "DIRECT"]
+    },
+    "objective": { "type": "string", "minLength": 1 },
+    "acceptance_criteria": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Must be observable. Something you could watch happen."
+      }
+    },
+    "allowed_paths": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string" }
+    },
+    "forbidden_paths": { "type": "array", "items": { "type": "string" } },
+    "required_tests": { "type": "array", "items": { "type": "string" } },
+    "behavior_check": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The command the operator runs and watches. Must demonstrate the behavior, not report a passing suite. Must run on Windows."
+    },
+    "constraints": { "type": "array", "items": { "type": "string" } },
+    "stop_conditions": { "type": "array", "items": { "type": "string" } },
+    "output_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate_commit", "evidence_bundle"],
+      "properties": {
+        "candidate_commit": { "const": "required" },
+        "evidence_bundle": { "const": "required" }
+      },
+      "description": "Deliberately excludes branch_pushed and pull_request. The executor has no network; the orchestrator owns the gate. Blueprint section 8.3."
+    }
+  }
+}

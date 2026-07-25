@@ -1,0 +1,52 @@
+name: gate
+
+# pull_request, never pull_request_target. On a public repo pull_request runs
+# fork code with a read-only token and no secrets; pull_request_target runs with
+# full secrets and write access, and is the documented path by which public
+# repositories get compromised.
+on: pull_request
+
+permissions:
+  contents: read          # least privilege, stated rather than inherited
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4   # pin by SHA once the digest is known
+
+      - name: CLAUDE.md is exactly one line
+        run: test "$(wc -l < CLAUDE.md)" -le 1
+
+      - name: No Director term defined outside AGENTS.md
+        run: |
+          # grep exits 1 when it finds nothing, which would fail the step on
+          # success. || true is load-bearing.
+          hits=$(grep -rl "PROMOTE\|FOCUSED_CORRECTION\|allowed_paths" \
+                   --include="*.md" . \
+                 | grep -v "^\./AGENTS\.md$" \
+                 | grep -v "^\./docs/blueprint\.md$" || true)
+          if [ -n "$hits" ]; then echo "Director terms in: $hits"; exit 1; fi
+
+      - name: No model name outside routes.yaml
+        run: |
+          # *.yaml as well as *.yml — routes.yaml is a .yaml file, so without it
+          # the exclusion below would be dead and the check would scan nothing.
+          hits=$(grep -rlE "gemini-[0-9]|claude-(opus|sonnet|haiku)-[0-9]|gpt-[0-9]" \
+                   --include="*.sh" --include="*.yml" --include="*.yaml" --include="*.json" . \
+                 | grep -v "^\./\.director/routes\.yaml$" \
+                 | grep -v "^\./\.github/workflows/gate\.yml$" || true)
+          if [ -n "$hits" ]; then echo "Model names outside routes.yaml: $hits"; exit 1; fi
+
+      - name: shellcheck
+        run: shellcheck scripts/*.sh .claude/hooks/*.sh
+
+      - name: schemas are valid
+        run: |
+          pipx install check-jsonschema
+          check-jsonschema --check-metaschema schemas/*.json
+
+      - name: hooks are executable and refuse what they must
+        run: |
+          chmod +x .claude/hooks/*.sh
+          bash .claude/hooks/selftest.sh

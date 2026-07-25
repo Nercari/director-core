@@ -1,0 +1,68 @@
+# The ONLY file in this project naming a provider, model, quota, or price.
+# Filled from what the CLIs reported on 2026-07-25 (blueprint §7.2, §7.3).
+# preflight refuses to launch on an unresolved alias or a stale entry.
+
+routes:
+  ORCH_PRIMARY:
+    tool: claude
+    version_seen: 2.1.220
+    auth: subscription          # Claude Pro, OAuth
+    model: default              # harness-selected; the swap drill governs changes
+    note: the only route with hooks
+    last_verified: 2026-07-25
+
+  ORCH_FALLBACK:
+    tool: codex
+    version_seen: 0.144.5
+    auth: subscription          # "Logged in using ChatGPT"
+    model: default
+    enforcement: reduced        # no hooks — treat every change as behavior-changing
+    forbidden_models:
+      - "gpt-oss-*"
+    last_verified: 2026-07-25
+
+  EXEC_PRIMARY:
+    tool: agy
+    version_seen: 1.1.7
+    auth: subscription          # Google AI Pro, OAuth
+    model: gemini-3.6-flash-medium
+    invoke: agy -p --sandbox --mode accept-edits --print-timeout 15m
+    network: denied             # §8.3 — the executor never reaches the gate
+    forbidden_models:           # agy can serve these; doing so destroys Layer 2
+      - "claude-*"
+      - "gpt-oss-*"
+    last_verified: 2026-07-25
+
+  EXEC_STRONG:
+    tool: codex
+    version_seen: 0.144.5
+    auth: subscription
+    model: default
+    invoke: codex exec --sandbox workspace-write --json --output-schema schemas/result.schema.json
+    network: denied
+    use: escalation only, on a named capability delta; also the State C executor
+    last_verified: 2026-07-25
+
+  EXEC_LOCAL:
+    tool: lmstudio
+    auth: local
+    model: gemma-4-12b-agentic-fable5-composer2.5-v2-3.5x-tau2
+    quant: Q4_K_M
+    size_gb: 7.38
+    state: absent               # absent | candidate | active — §17.1
+    blocked_by:
+      - capability test not run
+      - hermes-codex-harness still Phase-0 only
+      - capacity has never bound
+      - pipeline Phase 4 incomplete
+    last_verified: 2026-07-25
+
+# Capacity states — blueprint §7.4. Set by hand in .director/current-handoff.json;
+# operator judgement outranks inference. Detection is reactive: we learn we are
+# out by being refused.
+capacity_states:
+  A:  { orchestrator: ORCH_PRIMARY,  executor: EXEC_PRIMARY, layer2: cross-vendor, auto_merge: allowed }
+  B:  { orchestrator: ORCH_FALLBACK, executor: EXEC_PRIMARY, layer2: cross-vendor, auto_merge: allowed }
+  C:  { orchestrator: ORCH_PRIMARY,  executor: EXEC_STRONG,  layer2: cross-vendor, auto_merge: allowed }
+  C_prime: { orchestrator: ORCH_PRIMARY, executor: DIRECT,   layer2: SELF-REVIEW,  auto_merge: forbidden }
+  D:  { action: publish handoff and stop }

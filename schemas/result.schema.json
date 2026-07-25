@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Nercari/director-core/schemas/result.schema.json",
+  "title": "Director work-unit result",
+  "description": "What the executor reports. Blueprint section 8.3.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "candidate_commit", "branch", "route_used", "summary"],
+  "properties": {
+    "status": { "enum": ["completed", "blocked", "failed"] },
+    "candidate_commit": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{7,40}$"
+    },
+    "branch": { "type": "string", "pattern": "^task/[a-z0-9][a-z0-9-]*$" },
+    "route_used": {
+      "enum": ["EXEC_PRIMARY", "EXEC_STRONG", "EXEC_LOCAL", "DIRECT"]
+    },
+    "summary": { "type": "string", "minLength": 1 },
+    "files_changed": { "type": "array", "items": { "type": "string" } },
+    "tests_run": { "type": "array", "items": { "type": "string" } },
+    "tests_passed": { "type": "array", "items": { "type": "string" } },
+    "tests_failed": { "type": "array", "items": { "type": "string" } },
+    "unresolved_risks": { "type": "array", "items": { "type": "string" } },
+    "deviations_from_plan": { "type": "array", "items": { "type": "string" } },
+    "wall_time_seconds": { "type": "number", "minimum": 0 }
+  },
+  "not": {
+    "anyOf": [
+      { "required": ["pull_request_url"] },
+      { "required": ["branch_pushed"] }
+    ]
+  },
+  "$comment": "pull_request_url and branch_pushed are forbidden, not optional. Their presence means the executor reached the network, which means the sandbox failed. validate-result rejects on it."
+}

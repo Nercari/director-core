@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Nercari/director-core/schemas/handoff.schema.json",
+  "title": "Director handoff",
+  "description": "Published at the end of every cycle. A cold orchestrator must reconstruct the whole situation from this alone. If it has to ask something answered here, the handoff is incomplete. Blueprint section 18, Phase 4.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "published_at",
+    "run_id",
+    "capacity_state",
+    "objective",
+    "repository_state",
+    "decisions_taken",
+    "next_action"
+  ],
+  "properties": {
+    "published_at": { "type": "string", "format": "date-time" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "capacity_state": {
+      "enum": ["A", "B", "C", "C_prime", "D"],
+      "description": "Operator judgement outranks inference. Detection is reactive."
+    },
+    "objective": { "type": "string", "minLength": 1 },
+    "repository_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["main_commit", "open_branches", "open_pull_requests"],
+      "properties": {
+        "main_commit": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
+        "open_branches": { "type": "array", "items": { "type": "string" } },
+        "open_pull_requests": { "type": "array", "items": { "type": "string" } },
+        "worktrees": { "type": "array", "items": { "type": "string" } },
+        "lock_held": { "type": "boolean" }
+      }
+    },
+    "decisions_taken": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["decision", "rationale"],
+        "properties": {
+          "decision": {
+            "enum": ["PROMOTE", "FOCUSED_CORRECTION", "ESCALATE", "REJECT"]
+          },
+          "unit_id": { "type": "string" },
+          "rationale": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "next_action": { "type": "string", "minLength": 1 },
+    "blocked_on": { "type": ["string", "null"] },
+    "unresolved_risks": { "type": "array", "items": { "type": "string" } }
+  }
+}
