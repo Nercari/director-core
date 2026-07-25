@@ -5,6 +5,14 @@
 .director/probes/
 .scratch/
 
+# Local telemetry ledger state — never committed
+.telemetry/*.jsonl
+.telemetry/*.sqlite
+
+# Python bytecode
+__pycache__/
+*.pyc
+
 # Local settings override
 .claude/settings.local.json
 
