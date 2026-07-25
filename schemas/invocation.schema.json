@@ -29,6 +29,7 @@
     "executor_id": { "type": ["string", "null"] },
     "task_class": { "type": ["string", "null"] },
     "complexity_band": { "type": ["string", "null"] },
+    "validation_standard": { "type": ["string", "null"] },
     "effort": { "type": ["string", "null"] },
     "execution_mode": { "type": ["string", "null"] },
     "attempt_number": { "type": ["integer", "null"], "minimum": 0 },
@@ -48,9 +49,11 @@
     "completed": { "type": ["boolean", "null"] },
     "validation_passed": { "type": ["boolean", "null"] },
     "human_intervention": { "type": ["boolean", "null"] },
+    "escalated": { "type": ["boolean", "null"] },
     "failure_class": { "type": ["string", "null"] },
     "completed_at": { "type": ["string", "null"], "format": "date-time" },
     "telemetry_source": { "type": ["string", "null"] },
+    "telemetry_delta_source": { "type": ["string", "null"] },
     "telemetry_authoritative": { "type": "boolean" },
     "telemetry_unavailable": { "type": "boolean" }
   }

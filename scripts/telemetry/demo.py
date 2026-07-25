@@ -72,7 +72,8 @@ def main() -> int:
         ])
         ingest("codex", [str(codex_input)], metadata, state)
         codex, codex_without_quota = read_jsonl(state / "invocations.jsonl")[1:3]
-        assert codex["input_tokens"] == 3 and codex["total_tokens"] == 25
+        assert codex["input_tokens"] == 300 and codex["total_tokens"] == 2500
+        assert codex["telemetry_delta_source"] == "total_token_usage_forward_difference"
         assert codex["started_at"] == "2026-07-25T12:03:00Z"
         assert codex["model"] == "gpt-event"
         assert codex["quota_used_percent"] == 12.5
@@ -85,6 +86,7 @@ def main() -> int:
         assert codex_without_quota["quota_resets_at"] is None
         assert codex_without_quota["quota_limit_id"] is None
         assert codex_without_quota["model_context_window"] is None
+        assert codex_without_quota["telemetry_delta_source"] == "last_token_usage_fallback"
 
         agy_metadata = Metadata("director-core", "UNIT-1", "agy-run", "gemini-test",
                                 "2026-07-25T12:02:00Z")
@@ -105,7 +107,7 @@ def main() -> int:
         assert len(read_jsonl(state / "quarantine.jsonl")) == 1
 
     print("PASS: Claude Code cache creation mapping")
-    print("PASS: Codex uses source timestamps and last_token_usage deltas")
+    print("PASS: Codex uses source timestamps and cumulative usage deltas")
     print("PASS: Codex captures quota telemetry and leaves absent fields null")
     print("PASS: agy fallback records unknown telemetry")
     print("PASS: ingestion is idempotent and corrupt input is quarantined")
