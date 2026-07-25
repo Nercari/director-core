@@ -7,6 +7,7 @@ path="$(printf '%s' "$payload" | jq -r '.tool_input.file_path // ""' 2>/dev/null
 [ -z "$path" ] && exit 0
 
 base="$(basename "$path")"
+# shellcheck disable=SC1003
 norm="$(printf '%s' "$path" | tr '\\' '/')"
 
 deny() {

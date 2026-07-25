@@ -17,7 +17,9 @@ deny() {
 }
 
 # Normalise to forward slashes so Windows and POSIX forms compare alike.
+# shellcheck disable=SC1003
 norm="$(printf '%s' "$path" | tr '\\' '/')"
+# shellcheck disable=SC1003
 vault_norm="$(printf '%s' "$VAULT_WIN" | tr '\\' '/')"
 
 # --- the vault ---------------------------------------------------------------
@@ -35,6 +37,7 @@ esac
 # When a unit is running, .director/active-worktree names the only writable root.
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo "")"
 if [ -n "$ROOT" ] && [ -f "$ROOT/.director/active-worktree" ]; then
+  # shellcheck disable=SC1003
   active="$(tr -d '\r\n' < "$ROOT/.director/active-worktree" | tr '\\' '/')"
   if [ -n "$active" ]; then
     case "$norm" in

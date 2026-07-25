@@ -15,7 +15,9 @@ usage() {
   echo "usage: worktree.sh {create|remove} <unit-id>" >&2
   exit 2
 }
-[ -n "$ACTION" ] && [ -n "$UNIT" ] || usage
+if [ -z "$ACTION" ] || [ -z "$UNIT" ]; then
+  usage
+fi
 echo "$UNIT" | grep -qE '^[a-z0-9][a-z0-9-]*$' \
   || { echo "unit-id must be kebab-case: $UNIT" >&2; exit 2; }
 

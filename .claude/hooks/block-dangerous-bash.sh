@@ -19,7 +19,7 @@ deny() {
 
 # --- history rewriting -------------------------------------------------------
 case "$cmd" in
-*"push"*"--force"* | *"push"*"-f "* | *"push --force-with-lease"*)
+*"push"*"--force"* | *"push"*"-f "*)
   deny "force-push. Prefer revert; never rewrite history (§9.7)." ;;
 esac
 
@@ -36,7 +36,7 @@ esac
 # --- pushing to main ---------------------------------------------------------
 # Belt to GitHub's braces. The ruleset is the real barrier.
 case "$cmd" in
-*"push"*" main"* | *"push"*" origin main"* | *"push"*"HEAD:main"* | *"push"*":main"*)
+*"push"*" main"* | *"push"*"HEAD:main"* | *"push"*":main"*)
   deny "push to main. Push task/<unit-id> and open a pull request (§16)." ;;
 esac
 
