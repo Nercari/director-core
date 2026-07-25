@@ -27,6 +27,27 @@ field() {
 
 echo "preflight — $(date '+%Y-%m-%d %H:%M')"
 echo
+echo "session scope"
+
+# The hooks in .claude/settings.json only intercept tool calls for a Claude
+# Code session actually rooted here. A session opened one directory up (the
+# parent workspace) can write anywhere in this repo, or to the vault outside
+# 01_Inbox/, with nothing firing — found by hand on 2026-07-25 when two
+# probe writes that should have been blocked both succeeded silently.
+# "The orchestrator will cd into the right place" is exactly the bottom-tier
+# instruction §7.2 already refuses to rely on elsewhere in this file.
+if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
+  cpd_real="$(cd "$CLAUDE_PROJECT_DIR" 2>/dev/null && pwd || echo "$CLAUDE_PROJECT_DIR")"
+  if [ "$cpd_real" = "$ROOT" ]; then
+    pass "CLAUDE_PROJECT_DIR matches repo root — hooks are live for this session"
+  else
+    fail "CLAUDE_PROJECT_DIR ($cpd_real) does not match repo root ($ROOT) — hooks in .claude/settings.json will not fire for this session's tool calls. Open Claude Code with $ROOT as the project directory."
+  fi
+else
+  warn "CLAUDE_PROJECT_DIR is unset — cannot confirm the hooks are wired to this session"
+fi
+
+echo
 echo "no-overage controls (§14)"
 
 # A metered credential anywhere in the environment is a hard stop. The whole
