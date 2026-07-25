@@ -169,9 +169,10 @@ def mappings(value: Any) -> Iterable[dict[str, Any]]:
 
 
 def codex_usage_events(event: Any) -> Iterable[dict[str, Any]]:
-    """Yield owners of last_token_usage without relying on undocumented wrappers."""
+    """Yield owners of Codex usage snapshots without relying on wrappers."""
     for candidate in mappings(event):
-        if isinstance(candidate.get("last_token_usage"), dict):
+        if (isinstance(candidate.get("total_token_usage"), dict) or
+                isinstance(candidate.get("last_token_usage"), dict)):
             yield candidate
 
 
@@ -236,21 +237,48 @@ def codex_context_window(event: Any, owner: dict[str, Any]) -> int | None:
     return nullable_integer(owner.get("model_context_window"), "model_context_window")
 
 
+def codex_token_delta(owner: dict[str, Any], previous: dict[str, int] | None) -> tuple[dict[str, int], dict[str, int] | None, str]:
+    """Return a per-event delta, preferring the authoritative cumulative usage.
+
+    Codex can emit an identical token_count snapshot more than once.  Forward
+    differences make the repeated snapshot a zero delta.  A lower cumulative
+    value is a reset caused by a fork/resume, so its negative difference is
+    clamped to zero while the new snapshot becomes the next baseline.
+    """
+    cumulative = owner.get("total_token_usage")
+    if isinstance(cumulative, dict):
+        missing = [name for name in TOKEN_FIELDS if name not in cumulative]
+        if missing:
+            raise ValueError("Codex total_token_usage is missing " + ", ".join(missing))
+        current = {
+            name: require_non_negative_int(cumulative[name], f"total_token_usage.{name}")
+            for name in TOKEN_FIELDS
+        }
+        if previous is None:
+            delta = current.copy()
+        else:
+            delta = {name: max(0, current[name] - previous[name]) for name in TOKEN_FIELDS}
+        return delta, current, "total_token_usage_forward_difference"
+
+    fallback = owner.get("last_token_usage")
+    if not isinstance(fallback, dict):
+        raise ValueError("Codex usage event is missing total_token_usage and last_token_usage")
+    missing = [name for name in TOKEN_FIELDS if name not in fallback]
+    if missing:
+        raise ValueError("Codex last_token_usage is missing " + ", ".join(missing))
+    return ({name: require_non_negative_int(fallback[name], f"last_token_usage.{name}")
+             for name in TOKEN_FIELDS}, previous, "last_token_usage_fallback")
+
+
 def codex_record(event: Any, owner: dict[str, Any], metadata: Metadata, path: Path,
-                 session_model: str | None) -> dict[str, Any]:
+                 session_model: str | None,
+                 previous_cumulative: dict[str, int] | None) -> tuple[dict[str, Any], dict[str, int] | None]:
     model = first_non_empty_string(codex_model_identifier(event, owner), session_model,
                                    metadata.model)
     started_at = codex_started_at(event, metadata)
     if not model or not started_at:
         raise ValueError("Codex ingestion requires a source or --model identifier and a source or --started-at timestamp")
-    delta = owner["last_token_usage"]
-    missing = [name for name in TOKEN_FIELDS if name not in delta]
-    if missing:
-        raise ValueError("Codex last_token_usage is missing " + ", ".join(missing))
-    require_non_negative_int(delta["reasoning_output_tokens"], "reasoning_output_tokens")
-
-    # total_token_usage is cumulative for the session.  Never map it to a
-    # ledger entry: last_token_usage is the provider-supplied per-event delta.
+    delta, next_cumulative, delta_source = codex_token_delta(owner, previous_cumulative)
     record = base_record(metadata, run_id=metadata.run_id or path.stem, role="executor",
                          provider="codex", model=model, started_at=started_at,
                          authoritative=True)
@@ -267,8 +295,9 @@ def codex_record(event: Any, owner: dict[str, Any], metadata: Metadata, path: Pa
         **codex_quota_fields(event, owner),
         "model_context_window": codex_context_window(event, owner),
         "telemetry_source": "codex",
+        "telemetry_delta_source": delta_source,
     })
-    return record
+    return record, next_cumulative
 
 
 def agy_record(metadata: Metadata) -> dict[str, Any]:
@@ -353,6 +382,7 @@ def ingest(source: str, inputs: list[str], metadata: Metadata, state_dir: Path) 
 
     for path in input_files(inputs):
         session_model: str | None = None
+        previous_cumulative: dict[str, int] | None = None
         if not path.is_file():
             key = event_key(source, path, 0, "")
             if ledger.quarantine(key, source=path, line_number=0,
@@ -372,8 +402,12 @@ def ingest(source: str, inputs: list[str], metadata: Metadata, state_dir: Path) 
                     records = [record]
                 else:
                     session_model = codex_model_identifier(event) or session_model
-                    records = [codex_record(event, owner, metadata, path, session_model)
-                               for owner in codex_usage_events(event)]
+                    records = []
+                    for owner in codex_usage_events(event):
+                        record, previous_cumulative = codex_record(
+                            event, owner, metadata, path, session_model,
+                            previous_cumulative)
+                        records.append(record)
                     if not records:
                         continue
                 for ordinal, record in enumerate(records, start=1):
