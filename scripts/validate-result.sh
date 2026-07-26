@@ -67,10 +67,25 @@ else
 fi
 
 # Scope. Anything outside the packet's declared paths is out of scope, full stop.
+#
+# This FAILS CLOSED. Verified 2026-07-26: it previously skipped silently when the
+# packet was missing or declared no paths, and printed
+# "VALIDATED - safe to review, push, and open a pull request" for a commit
+# containing a deliberate FORBIDDEN.txt. Both executors have been observed
+# writing outside their declared scope, so an absent declaration is the one case
+# where waving the change through is least acceptable.
+if [ "$commit" != "null" ]; then
+  if [ ! -f "$PACKET" ]; then
+    fail "no packet at $PACKET — scope cannot be checked, so nothing is in scope — REJECT"
+  fi
+fi
+
 if [ -f "$PACKET" ] && [ "$commit" != "null" ]; then
   changed="$(git -C "$WT" diff --name-only "$main_before" "$commit" 2>/dev/null)"
   allowed="$(sed -n '/^allowed_paths:/,/^[a-z_]*:/p' "$PACKET" | sed -n 's/^ *- *//p')"
-  if [ -n "$allowed" ]; then
+  if [ -z "$allowed" ]; then
+    fail "packet declares no allowed_paths — REJECT. An undeclared scope is not an unlimited scope."
+  else
     outside=""
     while IFS= read -r f; do
       [ -z "$f" ] && continue
@@ -92,11 +107,14 @@ if [ -f "$PACKET" ] && [ "$commit" != "null" ]; then
   fi
 fi
 
-# The executor has no network (§8.3). If it reached the gate, the sandbox failed.
+# The executor is SUPPOSED to have no network, but as of 2026-07-26 it does
+# (§8.3 correction). So this only catches an executor that ADMITS reaching the
+# gate. An executor that pushes and stays quiet passes this check.
+# It is a tripwire, not a control. The control is §21.8's account isolation.
 if [ "$(jq -r '.pull_request_url // "absent"' "$RESULT")" != "absent" ]; then
-  fail "result reports a pull_request_url — the executor reached the network — REJECT"
+  fail "result reports a pull_request_url — the executor reached the gate — REJECT"
 else
-  pass "executor did not reach the gate"
+  pass "executor did not report reaching the gate (tripwire only — not proof)"
 fi
 
 if jq -e '.route_used' "$RESULT" >/dev/null 2>&1; then
