@@ -11,9 +11,9 @@ Reasoning lives in `docs/blueprint.md`. These are the rules. Keep this file shor
 ## Non-negotiable
 
 1. One writer at a time. `scripts/worktree.sh` holds the lock. Readers unlimited.
-2. The executor cannot push, open a pull request, or merge — **provided you invoke it through `scripts/exec-jail.sh`, which is what the `invoke:` line in `routes.yaml` does. Never call an executor binary directly.** Jailed and probed 2026-07-26: `gh` unauthenticated, `gh api` refused, `git push` cannot authenticate. Unjailed, all three succeed.
-2b. **Egress is still open.** The jail removes gate credentials, not network access. An executor can fetch and could exfiltrate. That is an accepted, recorded residual (§21.8) — do not describe the jail as isolation.
+2. The executor cannot push, open a pull request, or merge — **provided you invoke it through `scripts/exec-jail.sh`, which is what each usable route's `invoke:` line in `routes.yaml` does. Never call an executor binary directly. A route with no `invoke:` key is not usable — see §7.4.** Jailed and probed 2026-07-26: `gh` unauthenticated, `gh api` refused, `git push` cannot authenticate. Unjailed, all three succeed.
 2a. **Both executors have been observed writing outside `allowed_paths`.** Never treat an executor's exit code or prose as evidence. Diff the candidate commit yourself and reject on scope violation — that check belongs to the orchestrator.
+2b. **Egress is still open.** The jail removes gate credentials, not network access. An executor can fetch and could exfiltrate. That is an accepted, recorded residual (§21.8) — do not describe the jail as isolation.
 3. Never push to `main`. Never force-push. Never `reset --hard` a pushed branch. Never rewrite history — revert instead.
 4. Every headless agent call carries a `timeout`, and no inner timeout is shorter than the outer one.
 5. No `*_API_KEY` in any command. Subscription and OAuth auth only.
