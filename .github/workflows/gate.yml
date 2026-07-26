@@ -39,7 +39,9 @@ jobs:
           if [ -n "$hits" ]; then echo "Model names outside routes.yaml: $hits"; exit 1; fi
 
       - name: shellcheck
-        run: shellcheck scripts/*.sh .claude/hooks/*.sh
+        # find, not a glob: scripts/*.sh does not recurse, so scripts/telemetry/
+        # shipped two units completely unlinted. -print0/-0 survives spaces.
+        run: find scripts .claude/hooks -name '*.sh' -type f -print0 | xargs -0 shellcheck
 
       - name: schemas are valid
         run: |
