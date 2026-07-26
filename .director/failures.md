@@ -33,3 +33,23 @@ a decision months away:
 
 Permanent caveat: these are *commits*, not *merged units*, because none of that
 work passed through a pull request. Comparable in magnitude, not in kind.
+
+## Enforcement failures observed 2026-07-26
+
+Not unit failures — false safety claims in this repository's own configuration,
+found by an independent conformance probe plus a direct re-probe.
+
+| Date | What | §13.2 | Detail |
+|---|---|---|---|
+| 2026-07-26 | `network: denied` on both executor routes | n/a — spec defect | Declared, never enforced. Probed under `--sandbox workspace-write`: `nslookup` exit 0, `gh auth status` exit 0, `gh api user` exit 0 returning live authenticated JSON with `repo`+`workflow`. Seven units ran with the gate reachable |
+| 2026-07-26 | declared path scope ignored by agy | n/a — spec defect | Wrote to a forbidden path (`permitted: true`) and created an unrequested file |
+| 2026-07-26 | declared path scope ignored by codex | n/a — spec defect | Left `.director-codex.log` at repo root after being scoped to specific files |
+
+**Twice now, so §13.3's bar is met and machinery is justified:** declared-path
+enforcement has failed on *both* executors, independently. The orchestrator must
+diff and reject; the executor cannot be trusted to self-limit.
+
+**Root cause of the network claim, stated plainly:** §4.1 principle 10 says to
+prefer removing a capability over guarding it. What happened instead was writing
+down that the capability had been removed. A guarantee nobody probed is a
+guarantee nobody has.
