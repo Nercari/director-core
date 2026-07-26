@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import time
 import sys
 import threading
 from dataclasses import dataclass
@@ -38,6 +39,108 @@ TOKEN_FIELDS = (
 # JSONL append so a complete line is never lost or interleaved.  The ledger is
 # append-only; the lock intentionally covers only one file write at a time.
 APPEND_LOCK = threading.Lock()
+
+# A lock directory is used instead of a platform-specific file lock: mkdir is
+# atomic on the local filesystems supported by both Windows and POSIX Python.
+# Contenders wait briefly for the small append, while a longer age threshold
+# identifies a directory abandoned by a killed process.  Both limits are
+# bounded so an abandoned lock cannot block the append-only ledger forever.
+APPEND_LOCK_TIMEOUT_SECONDS = 2.0
+APPEND_LOCK_RETRY_SECONDS = 0.02
+APPEND_LOCK_STALE_SECONDS = 4.0
+
+
+class LockAcquisitionError(RuntimeError):
+    """Raised when a physical ledger append cannot obtain its process lock."""
+
+
+def append_lock_path(path: Path) -> Path:
+    return path.parent / f".{path.name}.append.lock"
+
+
+class ProcessAppendLock:
+    """Serialize one JSONL append across processes using an atomic directory.
+
+    A lock directory whose modification time is at least ``stale_after_seconds``
+    old is treated as abandoned and removed.  This recovers from a killed
+    process while preserving a bounded wait for all other contention.
+    """
+
+    def __init__(self, path: Path, *, timeout_seconds: float | None = None,
+                 retry_seconds: float | None = None,
+                 stale_after_seconds: float | None = None) -> None:
+        self.path = path
+        self.timeout_seconds = (APPEND_LOCK_TIMEOUT_SECONDS if timeout_seconds is None
+                                else timeout_seconds)
+        self.retry_seconds = (APPEND_LOCK_RETRY_SECONDS if retry_seconds is None
+                              else retry_seconds)
+        self.stale_after_seconds = (APPEND_LOCK_STALE_SECONDS
+                                    if stale_after_seconds is None
+                                    else stale_after_seconds)
+        self._held = False
+
+    def __enter__(self) -> ProcessAppendLock:
+        deadline = time.monotonic() + self.timeout_seconds
+        while True:
+            try:
+                self.path.mkdir()
+                self._held = True
+                return self
+            except (FileExistsError, PermissionError) as error:
+                try:
+                    age = time.time() - self.path.stat().st_mtime
+                except FileNotFoundError:
+                    if isinstance(error, PermissionError) and time.monotonic() >= deadline:
+                        raise LockAcquisitionError(
+                            f"timed out acquiring telemetry append lock at {self.path}"
+                        ) from error
+                    if isinstance(error, PermissionError):
+                        time.sleep(min(
+                            self.retry_seconds, max(0.0, deadline - time.monotonic())
+                        ))
+                    continue
+                if age >= self.stale_after_seconds:
+                    try:
+                        self.path.rmdir()
+                        print(
+                            "warning: breaking stale telemetry append lock at "
+                            f"{self.path} (age {age:.2f}s; timeout "
+                            f"{self.stale_after_seconds:.2f}s)",
+                            file=sys.stderr,
+                        )
+                    except FileNotFoundError:
+                        pass
+                    except OSError as error:
+                        raise LockAcquisitionError(
+                            f"unable to remove stale telemetry append lock at "
+                            f"{self.path}: {error}"
+                        ) from error
+                    continue
+                if time.monotonic() >= deadline:
+                    raise LockAcquisitionError(
+                        f"timed out acquiring telemetry append lock at {self.path}"
+                    )
+                time.sleep(min(self.retry_seconds, max(0.0, deadline - time.monotonic())))
+            except OSError as error:
+                raise LockAcquisitionError(
+                    f"unable to acquire telemetry append lock at {self.path}: {error}"
+                ) from error
+
+    def __exit__(self, exc_type: object, exc_value: object,
+                 traceback: object) -> bool:
+        if self._held:
+            try:
+                self.path.rmdir()
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                print(
+                    f"warning: could not remove telemetry append lock at {self.path}: {error}",
+                    file=sys.stderr,
+                )
+            finally:
+                self._held = False
+        return False
 
 
 @dataclass(frozen=True)
@@ -350,8 +453,9 @@ class Ledger:
     @staticmethod
     def _append(path: Path, value: Any) -> None:
         with APPEND_LOCK:
-            with path.open("a", encoding="utf-8", newline="\n") as handle:
-                handle.write(json_line(value) + "\n")
+            with ProcessAppendLock(append_lock_path(path)):
+                with path.open("a", encoding="utf-8", newline="\n") as handle:
+                    handle.write(json_line(value) + "\n")
 
     def append(self, key: str, record: dict[str, Any]) -> bool:
         if key in self.keys:
@@ -452,7 +556,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     metadata = Metadata(args.project_id, args.work_unit_id, args.run_id,
                         args.model, args.started_at)
-    summary = ingest(args.source, args.input, metadata, args.state_dir)
+    try:
+        summary = ingest(args.source, args.input, metadata, args.state_dir)
+    except LockAcquisitionError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
     print("ingested={ingested} skipped={skipped} quarantined={quarantined}".format(**summary))
     return 0
 
