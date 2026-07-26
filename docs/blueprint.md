@@ -1,11 +1,13 @@
-# DIRECTOR ORCHESTRATION BLUEPRINT — REVISION 10.2
+# DIRECTOR ORCHESTRATION BLUEPRINT — REVISION 10.3
 
-**Supersedes:** all prior revisions (7.4, 8.x, 9.0–9.3, 10.0, 10.1)
+**Supersedes:** all prior revisions (7.4, 8.x, 9.0–9.3, 10.0, 10.1, 10.2)
 **Date:** 2026-07-25
 **Operator:** solo, non-programmer. Subscriptions: Claude Pro · ChatGPT Plus · Google AI Pro · local models via LM Studio
 **Platform:** Windows 11 Pro, PowerShell primary, Git Bash (Cygwin bash 5.3.9) available
 **Policy:** zero metered spend, always. OAuth/subscription auth only — never an API key
 **Status:** implementation-ready. Every environment claim below was verified on this machine on 2026-07-25.
+
+**What 10.3 adds:** §21, the Token Accounting and Workflow Efficiency Plane — implemented and merged after 10.2 was written. It was working code with no place in the specification, which is the §6.2 failure this document warns about applied to itself: a subsystem that exists only in the repository and in a conversation does not exist for the next session.
 
 ---
 
@@ -116,6 +118,10 @@ EVIDENCE ───── worktree · branch · candidate commit · raw test outp
 GATE ───────── pull request → checks → (auto-merge | operator merge) → main
 
 CONTEXT ────── director-core repo (reusable core) + vault (procedural memory)
+
+ACCOUNTING ─── every invocation above is metered (§21)
+     instrumentation → append-only ledger → reducer → scorecard → advisory route
+     runs beside the pipeline, never inside the Director's context
 ```
 
 One work unit = one worktree = one branch = one pull request. One **writer** at a time; readers unlimited (§17).
@@ -929,6 +935,91 @@ Populate `04_Memory/` only with procedures that have already recurred three time
 **And one lesson 10.2 paid for:** a layer you cannot enforce is not a layer. Five of 10.1's ten invariants were decoration because a hook cannot see inside a subprocess. The fix was not more machinery — it was taking a capability away.
 
 **It must keep justifying itself against the simplest thing that works.** When the satisficing thresholds hold but the work feels slower than the 10–15 commits per week you managed without any of this, simplify: route the work directly and delete a layer.
+
+---
+
+## 21. Token Accounting and Workflow Efficiency Plane
+
+Added after 10.2. Answers one question with evidence instead of intuition: **which workflow is cheapest per validated successful work unit** — not per attempt, and not per token.
+
+### 21.1 The principle
+
+> Collect telemetry continuously **outside** the Director's context, aggregate it deterministically, and expose only a compact scorecard at routing boundaries.
+
+The Director must never read the raw ledger. Doing so would spend the budget being measured and contaminate the measurement. It must also never estimate its own usage by reasoning about it — when harness telemetry exists, recall is the worst available source.
+
+```
+instrumentation → append-only ledger → deterministic reducer → scorecard → advisory routing
+```
+
+### 21.2 What is authoritative, and what is not
+
+The distinction is load-bearing. Confusing the two makes every downstream number a guess wearing a suit.
+
+| Source | Status | Notes |
+|---|---|---|
+| Claude Code session JSONL | **authoritative** | `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `output_tokens`, model, timestamps |
+| codex rollout JSONL | **authoritative** | adds `reasoning_output_tokens`, `time_to_first_token_ms`, `model_context_window`, and live quota (`used_percent`, `resets_at`, `credits`) |
+| agy | **unavailable** | exposes nothing on disk. Its adapter records nulls with `telemetry_authoritative: false`. It does not guess |
+| preflight estimate | **estimate only** | no tokenizer exists here. `authoritative` is hardcoded false |
+| every derived metric | **derived** | labelled as such |
+
+**`estimated_cost` is null everywhere.** The operator is on subscriptions, so quota is the currency and invented dollar figures would be worse than no figure. Accounting mode is `subscription_quota`.
+
+### 21.3 Counting correctly
+
+codex reports both a cumulative counter and a per-event delta, and **it can emit the same event twice** — observed nine seconds apart with the cumulative unchanged. Summing the deltas naively inflated a real 119-event session by 1.59%.
+
+Deltas are therefore **forward differences of the cumulative counter**, which makes a duplicate a zero delta by construction rather than by detection. A decrease means a fork or resume: clamp to zero and rebaseline.
+
+> A correction that works by construction beats one that works by recognising the case you happened to think of.
+
+### 21.4 Comparison is scoped, or it is meaningless
+
+Metrics group strictly by `task_class`, `complexity_band`, `validation_standard`, `route_id`, `execution_mode`. Unrelated work is never compared.
+
+The optimizing metric is **`tokens_per_validated_success`**: all tokens across all attempts, divided by validated successes. Retries count. Failures never count as successes.
+
+This is the whole point, and the seeded demonstration exists to show it:
+
+| | tokens/attempt | retry rate | **tokens/validated success** |
+|---|---|---|---|
+| Route A | 1,000 | 75% | 1,944 |
+| Route B | 1,500 | 5% | **1,658** |
+
+Route A is 33% cheaper per attempt and worse per outcome. Per-attempt cost is the misleading number.
+
+### 21.5 Advisory by default
+
+`mode: advisory` in `.telemetry/routing-policy.yaml`. The optimizer computes and logs what it *would* choose and changes nothing. **Only a deliberate operator edit makes it `enforcing`.**
+
+A route is ineligible below 10 completed runs or below 0.90 validated success rate. With no eligible route the answer is `null` plus a stated reason — never a guess.
+
+Every advisory call appends a decision record. Recording the actual route afterwards **appends a linked event; it never mutates the original**, so the optimizer cannot rewrite its own history to look correct in hindsight. That disagreement log is the only thing that could ever justify enforcing mode.
+
+The optimizer may change route, effort, batch vs interactive, parallel vs sequential, escalation timing, context size, retrieval scope. **It may never** remove required validation, skip a security review, skip a destructive-action confirmation, disable handoff generation, or lower a success threshold to make itself look better.
+
+### 21.6 Preflight is an estimate, and says so
+
+No token-counting API exists here — OAuth only, and §14 forbids introducing a metered key. So preflight uses a documented characters-per-token heuristic, labels everything `estimated_*`, reports confidence `low`, and emits `null` where it cannot compute rather than inventing a number.
+
+It gets trustworthy through **calibration**: estimates are logged, then joined against authoritative post-invocation `input_tokens` by `work_unit_id`. Reconciliation suggests a correction factor, refuses below 10 matched pairs, and never auto-applies.
+
+It **advises** remediation in order — trim history, trim tool definitions, prefer the handoff over full context, retrieve only required files, recount, then split the unit — but performs none of it. Splitting a work unit is a judgement call that belongs to the Director.
+
+### 21.7 What it cannot do yet
+
+- **Zero real completed runs.** Every honest answer today is "insufficient samples". The seeded comparison proves the mechanism, not any real route's superiority.
+- **The ledger append lock is process-local.** Two executors are two processes. Multi-process writer safety is unproven and needs cross-process coordination before anyone relies on it.
+- **agy contributes no usage data at all**, so any workflow routing through it is measured with a hole in it.
+
+### 21.8 The lesson this subsystem taught
+
+Twice, a CI check was green **because it was not looking**: the shellcheck glob missed `scripts/telemetry/` entirely, then the model-name check omitted `*.py`. And the first ledger unit passed its own 5/5 self-check while being completely broken on real provider data — the fixtures and the implementation shared one misunderstanding, so the test could not see it.
+
+> **Verify a gate's coverage, not just its logic.** A green check over an empty file set is indistinguishable from a green check over real files.
+>
+> **Anything that reads third-party data is validated against real files, never fixtures alone.**
 
 ---
 

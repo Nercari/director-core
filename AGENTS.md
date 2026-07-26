@@ -57,6 +57,26 @@ If `change_class` is ever ambiguous, it is `behavior`.
 
 **The operator's spot-check is an intent audit, not a code review.** One question per sampled pull request: *should this have been `behavior`?*
 
+## Token accounting
+
+Read the scorecard, never the raw ledger — reading it spends the budget you are measuring.
+
+```bash
+bash scripts/telemetry/route_advisor.sh --task-class <class> --complexity-band <band>
+```
+
+Consult it before selecting a route, before escalating, and when choosing batch vs interactive.
+
+The policy is **advisory**. It reports what it would choose; you still decide. Only the operator may set `mode: enforcing`.
+
+`recommended_route: null` means insufficient evidence, not "any route is fine". Under 10 completed runs or below 0.90 validated success, a route is ineligible. Today every answer is null — that is correct, not broken.
+
+Deviating from a recommendation is allowed and expected. Record the reason.
+
+Optimise `tokens_per_validated_success`, never tokens per attempt — a cheap route that retries constantly is the expensive one.
+
+Never call an estimate a measurement. Preflight estimates; only post-invocation telemetry measures. `estimated_cost` is null because we are on subscriptions; quota is the currency.
+
 ## Adding anything
 
 Nothing is added — no rule, script, hook, note, route, or section — for a failure mode that has not occurred at least twice in `.director/failures.md`.
