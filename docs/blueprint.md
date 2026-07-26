@@ -189,16 +189,20 @@ routes:
     auth: subscription              # Google AI Pro, OAuth
     model: gemini-3.6-flash-medium
     flags: --sandbox --mode accept-edits --print-timeout <matches outer timeout>
-    network: denied                 # §8.3
+    network: REACHABLE_NOT_ENFORCED # probed 2026-07-26; see §8.3 correction, §21.8
+    gate_credentials: REACHABLE     # gh keyring visible to the executor
+    quarantined: true               # do not route work here until enforced
     forbidden_models: [ "claude-*", "gpt-oss-*" ]
-    last_verified: 2026-07-25
+    last_verified: 2026-07-26
   EXEC_STRONG:
     tool: codex exec
     auth: subscription
     model: <filled at setup>
     use: escalation only, on a named capability delta
-    network: denied
-    last_verified: 2026-07-25
+    network: REACHABLE_NOT_ENFORCED # probed 2026-07-26; same gap as EXEC_PRIMARY
+    gate_credentials: REACHABLE
+    quarantined: true
+    last_verified: 2026-07-26
   EXEC_LOCAL:
     tool: lmstudio                  # gemma-4-12b-agentic-fable5-composer2.5-v2-3.5x-tau2, Q4_K_M, 7.38 GB
     auth: local
@@ -327,7 +331,28 @@ Target 1,500–4,000 tokens. **A unit whose objective and acceptance criteria ca
 }
 ```
 
-**The executor has no network, and this is load-bearing.**
+> **CORRECTION, 2026-07-26 — read before relying on anything in this section.**
+> This section described the executor as having no network. **It does.** Probed
+> directly under `codex exec --sandbox workspace-write`: `nslookup github.com`
+> exit 0, `gh auth status` exit 0, **`gh api user` exit 0 returning live
+> authenticated JSON** with `repo` and `workflow` scope. An independent probe
+> found the same for agy, which additionally wrote outside its `allowed_paths`.
+> `--sandbox` restricted neither network, nor credentials, nor paths.
+>
+> Seven units were executed on this design on 2026-07-25. Nothing mechanical
+> prevented the executor pushing a branch, opening a pull request, or merging
+> one. Only the prompt asked it not to — tier 3, the weakest layer here.
+>
+> **The design below is right. The implementation was a declaration, not a
+> control.** §4.1 principle 10 says to prefer removing the capability; what
+> actually happened was writing down that it had been removed. `routes.yaml`
+> now records `network: REACHABLE_NOT_ENFORCED` and both executor routes are
+> quarantined. §21.9 records the enforcement that would make the claim true.
+>
+> This is the sharpest available example of the document's own thesis: a
+> guarantee nobody probed is a guarantee nobody has.
+
+**The executor is intended to have no network, and this is load-bearing.**
 
 10.1 required the executor to push its branch and open the pull request. That design hands the gate's bypass to the least supervised process in the system, for a structural reason 10.1 did not notice: **every hook in §15.1 is a Claude Code `PreToolUse` hook.** It fires on the orchestrator's tool calls. An executor launched as a subprocess runs its own shell; the hook sees `agy -p "<packet>"` and nothing after. Of the ten invariants, only "no push to `main`" had a second line of defence (the GitHub ruleset). The rest — no force-push, no hard reset, **no merging**, no reading secrets, no metered credentials — were unenforced against the one process actually writing code.
 
@@ -878,14 +903,14 @@ Set every control in §14. Create `director-core` as a **public** repository. Wr
 
 **Phase 2 — delegation round trip.**
 Wire agy with `--sandbox --mode accept-edits --print-timeout`, JSON output, a schema, and an outer `timeout`. Confirm it has no reachable network or `gh` credential.
-*Verify:* run one real bounded task end to end as a **behavior change**. Confirm by hand: the worktree existed; the **orchestrator** pushed the branch and opened the PR; the executor never touched the network; the evidence directory holds real test output rather than prose; `validate-result` rejects a deliberately corrupted result file. Run the behavior check yourself, read the adversarial review, merge.
+*Verify:* run one real bounded task end to end as a **behavior change**. Confirm by hand: the worktree existed; the **orchestrator** pushed the branch and opened the PR; **the executor's network and gate access are ABSENT rather than merely unused** — probe it, do not infer it (§8.3 correction, §21.8); the evidence directory holds real test output rather than prose; `validate-result` rejects a deliberately corrupted result file. Run the behavior check yourself, read the adversarial review, merge.
 
 **Phase 3 — auto-merge, in `Finance dashboard`.**
 **Not in `director-core`.** §9.4 condition 4 makes almost every file there non-green-path, so the only units available would be documentation edits — a thin test of a real gate. Apply Phase −1 to `Finance dashboard` (private), then run at least three green-path units through.
 *Verify:* open a PR violating each CI check in turn and watch the gate go red. Confirm auto-merge does **not** fire on a PR touching `.github/**`. Spot-check every auto-merged change this month, asking only §12's one question.
 
 **Phase 4 — fallback and conformance, in `director-core`.**
-Build the five conformance scenarios: executor reports success with no candidate commit → REJECT · file changed outside permitted paths → REJECT · required test skipped with no blocker → REJECT · second failure with the attribution test blaming the criteria → REJECT and re-slice · **an executor with no network cannot reach `gh` at all — verify the capability is absent rather than the instruction obeyed.**
+Build the five conformance scenarios: executor reports success with no candidate commit → REJECT · file changed outside permitted paths → REJECT · required test skipped with no blocker → REJECT · second failure with the attribution test blaming the criteria → REJECT and re-slice · **an executor with no network cannot reach `gh` at all — verify the capability is absent rather than the instruction obeyed. **As of 2026-07-26 this scenario FAILS: `gh api user` returns live authenticated JSON inside the sandbox. It cannot pass until §21.8's account-scoped isolation is in place.****
 *Verify:* mid-task, publish a handoff and open the fallback orchestrator cold. It must reconstruct objective, decisions, repository state, and next action without the prior conversation. If it asks something the handoff already answers, the handoff is incomplete. Then run all five scenarios on both orchestrators; decisions must match. Where they diverge, tighten `AGENTS.md` and re-run both — never add a platform-specific patch.
 **Re-run conformance when `ORCH_*` changes. Do not re-run it when `EXEC_*` changes** — executors do not decide, so swapping one cannot threaten decision consistency. This is what makes per-project executor rotation nearly free.
 
@@ -1013,7 +1038,23 @@ It **advises** remediation in order — trim history, trim tool definitions, pre
 - **Each physical JSONL append is protected across threads and local processes.** `threading.Lock` serializes adapters within one interpreter, while an atomic lock directory beside the target JSONL serializes separate interpreter processes. Acquisition waits at most two seconds; a directory at least four seconds old is treated as abandoned, removed with a warning, and retried. A timeout fails loudly with the lock path rather than writing unlocked. This is not a transaction across the ledger and its separate hash index, and it is not a guarantee on network filesystems or for a live process paused longer than the stale-lock threshold.
 - **agy contributes no usage data at all**, so any workflow routing through it is measured with a hole in it.
 
-### 21.8 The lesson this subsystem taught
+### 21.8 Executor isolation — the unbuilt control
+
+`network: denied` was recorded in the registry and never enforced (§8.3 correction). Closing it needs a control at the operating-system layer, because everything weaker has been tried and observed to fail:
+
+- **Prompt instruction** — tier 3. Observed insufficient: the executor wrote outside `allowed_paths` when asked not to, on both routes.
+- **`--sandbox`** — observed to restrict neither network, credentials, nor paths.
+- **Per-image firewall rules** — cannot work. The executor reaches the network through *child* processes (`git.exe`, `gh.exe`, `curl.exe`), each a separate image with its own firewall identity. Blocking `agy.exe` or `codex.exe` blocks nothing, and the `gh` keyring credential survives every such rule.
+
+**The control that closes both holes at once:** run the executor as a dedicated non-admin Windows account, with a Windows Firewall outbound-block rule scoped to that account's **SID** — which covers every child process it spawns — and with no `gh` keyring entry and no credential-manager state for that account.
+
+Measured by the autoresearch session on a candidate `hermes-exec` account: `curl` fails to connect in 29 ms, `git ls-remote` fails in 73 ms, `gh auth status` reports no authentication.
+
+One caveat that matters: a blanket outbound block also stops agy reaching Gemini. For a real agy unit the rule must be narrowed to GitHub's published ranges rather than everything.
+
+**Path enforcement stays with the orchestrator regardless.** Both executors have now been observed ignoring `allowed_paths`, so the orchestrator diffs the candidate commit and rejects — which is what §8.3 already argued, and is the part of that section that survives the correction intact.
+
+### 21.9 The lesson this subsystem taught
 
 Twice, a CI check was green **because it was not looking**: the shellcheck glob missed `scripts/telemetry/` entirely, then the model-name check omitted `*.py`. And the first ledger unit passed its own 5/5 self-check while being completely broken on real provider data — the fixtures and the implementation shared one misunderstanding, so the test could not see it.
 
