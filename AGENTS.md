@@ -5,13 +5,14 @@ Reasoning lives in `docs/blueprint.md`. These are the rules. Keep this file shor
 ## Roles
 
 - **Orchestrator** decides, reviews, pushes the branch, opens the pull request. Never merges.
-- **Executor** edits files inside the worktree, commits, writes its result, stops. No network.
+- **Executor** edits files inside the worktree, commits, writes its result, stops.
 - **Operator** runs the behavior check and merges. The only one who merges.
 
 ## Non-negotiable
 
 1. One writer at a time. `scripts/worktree.sh` holds the lock. Readers unlimited.
-2. The executor never pushes, never opens a pull request, never merges, never reaches the network.
+2. The executor must not push, open a pull request, or merge. **This is currently unenforced — both executors were probed on 2026-07-26 and reach the network with live `gh` credentials (`repo`, `workflow`). Assume an executor CAN reach the gate and route accordingly.** Both routes are `quarantined: true`.
+2a. **Both executors have been observed writing outside `allowed_paths`.** Never treat an executor's exit code or prose as evidence. Diff the candidate commit yourself and reject on scope violation — that check belongs to the orchestrator.
 3. Never push to `main`. Never force-push. Never `reset --hard` a pushed branch. Never rewrite history — revert instead.
 4. Every headless agent call carries a `timeout`, and no inner timeout is shorter than the outer one.
 5. No `*_API_KEY` in any command. Subscription and OAuth auth only.
