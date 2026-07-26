@@ -53,3 +53,20 @@ diff and reject; the executor cannot be trusted to self-limit.
 prefer removing a capability over guarding it. What happened instead was writing
 down that the capability had been removed. A guarantee nobody probed is a
 guarantee nobody has.
+
+## validate-result.sh fail-open, found 2026-07-26
+
+Third enforcement defect of the day, and the second in the scope-checking path.
+
+`validate-result.sh` had never been executed since it was written. First run
+revealed it **failed open**: with the packet missing, or present but declaring no path scope, it skipped the scope check silently and printed
+`VALIDATED - safe to review, push, and open a pull request` for a commit
+containing a deliberate `FORBIDDEN.txt`.
+
+Now fails closed. No packet, or no declared path scope, is a REJECT: an undeclared
+scope is not an unlimited scope.
+
+The lesson is the same one as the shellcheck glob and the model-name include
+list: **an unexercised check is an unknown check.** Three of tonight's defects
+were checks that reported success by not looking. Writing a gate and running a
+gate are different acts.
