@@ -9,55 +9,57 @@ routes:
     auth: subscription          # Claude Pro, OAuth
     model: default              # harness-selected; the swap drill governs changes
     note: the only route with hooks
-    last_verified: 2026-07-25
+    last_verified: 2026-07-26
 
   ORCH_FALLBACK:
     tool: codex
-    version_seen: 0.144.5
+    version_seen: 0.145.0
     auth: subscription          # "Logged in using ChatGPT"
     model: default
     enforcement: reduced        # no hooks — treat every change as behavior-changing
     forbidden_models:
       - "gpt-oss-*"
-    last_verified: 2026-07-25
+    last_verified: 2026-07-26
 
   EXEC_PRIMARY:
     tool: agy
     version_seen: 1.1.7
     auth: subscription          # Google AI Pro, OAuth
     model: gemini-3.6-flash-medium
-    invoke: agy -p --sandbox --mode accept-edits --print-timeout 15m
+    invoke: scripts/exec-jail.sh agy -p --sandbox --mode accept-edits --print-timeout 15m
     # CORRECTED 2026-07-26. This previously read "network: denied" and that was
     # false. A conformance probe proved agy under --sandbox reaches the public
     # network AND holds live gh credentials with repo+workflow scope, and writes
     # outside allowed_paths. --sandbox restricted none of it.
-    network: REACHABLE_NOT_ENFORCED
-    gate_credentials: REACHABLE          # gh keyring is visible to the executor
-    quarantined: true                    # do not route work here until enforced
-    enforcement_gap: "No mechanism prevents this executor pushing or opening a PR. Only the prompt asks it not to, which is tier 3."
+    network: EGRESS_OPEN                 # DNS + public reads work. Not closed.
+    gate_credentials: REMOVED_BY_EXEC_JAIL
+    quarantined: false                   # gate closed 2026-07-26; see enforcement below
+    enforcement: "scripts/exec-jail.sh empties GH_CONFIG_DIR and nulls git config, so gh is unauthenticated and push cannot authenticate. Probed inside a live jailed codex run, not inferred. MUST be invoked through the jail — the invoke line above is the control."
+    residual_risk: "Egress is open, so an executor can still fetch and could exfiltrate. Closing that needs the account-scoped firewall rule in blueprint 21.8, which is an operator task."
     forbidden_models:           # agy can serve these; doing so destroys Layer 2
       - "claude-*"
       - "gpt-oss-*"
-    last_verified: 2026-07-25
+    last_verified: 2026-07-26
 
   EXEC_STRONG:
     tool: codex
-    version_seen: 0.144.5
+    version_seen: 0.145.0
     auth: subscription
     model: default
-    invoke: codex exec --sandbox workspace-write --json --output-schema schemas/result.schema.json
+    invoke: scripts/exec-jail.sh codex exec --sandbox workspace-write --json --output-schema schemas/result.schema.json
     # CORRECTED 2026-07-26. Probed directly under --sandbox workspace-write:
     #   nslookup github.com   exit 0  (DNS resolves)
     #   gh auth status        exit 0  (authenticated)
     #   gh api user           exit 0  (live authenticated API, repo+workflow)
     # git ls-remote failed only on a schannel credential error, not a network
     # block. Seven units ran on this route on 2026-07-25 with the gate reachable.
-    network: REACHABLE_NOT_ENFORCED
-    gate_credentials: REACHABLE
-    quarantined: true
-    enforcement_gap: "Same as EXEC_PRIMARY. Nothing prevented push or PR; only the prompt did."
+    network: EGRESS_OPEN
+    gate_credentials: REMOVED_BY_EXEC_JAIL
+    quarantined: false                   # gate closed 2026-07-26 via exec-jail
+    enforcement: "Same control as EXEC_PRIMARY. Verified in a live jailed run: gh unauthenticated, gh api refused, push cannot authenticate."
+    residual_risk: "Egress open. See blueprint 21.8."
     use: escalation only, on a named capability delta; also the State C executor
-    last_verified: 2026-07-25
+    last_verified: 2026-07-26
 
   EXEC_LOCAL:
     tool: lmstudio
@@ -71,7 +73,7 @@ routes:
       - hermes-codex-harness still Phase-0 only
       - capacity has never bound
       - pipeline Phase 4 incomplete
-    last_verified: 2026-07-25
+    last_verified: 2026-07-26
 
 # Capacity states — blueprint §7.4. Set by hand in .director/current-handoff.json;
 # operator judgement outranks inference. Detection is reactive: we learn we are

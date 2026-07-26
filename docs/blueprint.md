@@ -349,6 +349,11 @@ Target 1,500–4,000 tokens. **A unit whose objective and acceptance criteria ca
 > now records `network: REACHABLE_NOT_ENFORCED` and both executor routes are
 > quarantined. §21.9 records the enforcement that would make the claim true.
 >
+> **Update, same day:** the gate half is now closed and probed — see §21.8.
+> `scripts/exec-jail.sh` removes the credentials, verified inside a live jailed
+> executor run. Egress remains open. The routes are out of quarantine for the
+> gate and only for the gate.
+>
 > This is the sharpest available example of the document's own thesis: a
 > guarantee nobody probed is a guarantee nobody has.
 
@@ -910,7 +915,7 @@ Wire agy with `--sandbox --mode accept-edits --print-timeout`, JSON output, a sc
 *Verify:* open a PR violating each CI check in turn and watch the gate go red. Confirm auto-merge does **not** fire on a PR touching `.github/**`. Spot-check every auto-merged change this month, asking only §12's one question.
 
 **Phase 4 — fallback and conformance, in `director-core`.**
-Build the five conformance scenarios: executor reports success with no candidate commit → REJECT · file changed outside permitted paths → REJECT · required test skipped with no blocker → REJECT · second failure with the attribution test blaming the criteria → REJECT and re-slice · **an executor with no network cannot reach `gh` at all — verify the capability is absent rather than the instruction obeyed. **As of 2026-07-26 this scenario FAILS: `gh api user` returns live authenticated JSON inside the sandbox. It cannot pass until §21.8's account-scoped isolation is in place.****
+Build the five conformance scenarios: executor reports success with no candidate commit → REJECT · file changed outside permitted paths → REJECT · required test skipped with no blocker → REJECT · second failure with the attribution test blaming the criteria → REJECT and re-slice · **an executor with no network cannot reach `gh` at all — verify the capability is absent rather than the instruction obeyed. **As of 2026-07-26 this scenario PASSES for the gate when the executor is invoked through `scripts/exec-jail.sh` (§21.8): `gh api user` is refused and push cannot authenticate, probed live. It still FAILS for egress — DNS resolves — which needs §21.9's account isolation.****
 *Verify:* mid-task, publish a handoff and open the fallback orchestrator cold. It must reconstruct objective, decisions, repository state, and next action without the prior conversation. If it asks something the handoff already answers, the handoff is incomplete. Then run all five scenarios on both orchestrators; decisions must match. Where they diverge, tighten `AGENTS.md` and re-run both — never add a platform-specific patch.
 **Re-run conformance when `ORCH_*` changes. Do not re-run it when `EXEC_*` changes** — executors do not decide, so swapping one cannot threaten decision consistency. This is what makes per-project executor rotation nearly free.
 
@@ -1038,9 +1043,39 @@ It **advises** remediation in order — trim history, trim tool definitions, pre
 - **Each physical JSONL append is protected across threads and local processes.** `threading.Lock` serializes adapters within one interpreter, while an atomic lock directory beside the target JSONL serializes separate interpreter processes. Acquisition waits at most two seconds; a directory at least four seconds old is treated as abandoned, removed with a warning, and retried. A timeout fails loudly with the lock path rather than writing unlocked. This is not a transaction across the ledger and its separate hash index, and it is not a guarantee on network filesystems or for a live process paused longer than the stale-lock threshold.
 - **agy contributes no usage data at all**, so any workflow routing through it is measured with a hole in it.
 
-### 21.8 Executor isolation — the unbuilt control
+### 21.8 Executor gate containment — built and probed
 
-`network: denied` was recorded in the registry and never enforced (§8.3 correction). Closing it needs a control at the operating-system layer, because everything weaker has been tried and observed to fail:
+**Closed 2026-07-26 for the gate. Still open for egress.** Naming the difference precisely is the point; the §8.3 correction exists because a previous version of this section did not.
+
+`scripts/exec-jail.sh` wraps every executor invocation and removes the credentials that reach the gate:
+
+| Variable | Effect |
+|---|---|
+| `GH_CONFIG_DIR` → empty dir | **the load-bearing one.** `gh` reads host credentials from there, so it is unauthenticated even though the operator's real keyring entry is untouched |
+| `GIT_CONFIG_GLOBAL` / `_SYSTEM` → empty file | no credential helper is reachable |
+| `GH_TOKEN`, `GITHUB_TOKEN` unset | no token fallback |
+| `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never` | a credential prompt becomes an immediate failure rather than a hang |
+
+Probed **inside a live jailed codex run**, not inferred:
+
+| Probe | Unjailed | Jailed |
+|---|---|---|
+| `gh auth status` | `github.com` (authenticated) | `You are not logged into any GitHub hosts` |
+| `gh api user` | live authenticated JSON | `please run gh auth login` |
+| `git push --dry-run` | `* [new branch]` — would have pushed | cannot authenticate |
+| `nslookup github.com` | resolves | **resolves — unchanged** |
+
+**The control is the `invoke:` line in `routes.yaml`.** An executor called directly bypasses the jail entirely, which is why the wrapper is configuration rather than a habit.
+
+**What remains open, stated plainly.** Egress. DNS resolves, public reads succeed — `git ls-remote` against a public repository needs no credentials at all. An executor can still fetch and could still exfiltrate. Closing that needs a dedicated non-admin account with a Windows Firewall outbound-block rule scoped to its **SID**, because per-image rules cannot work: the executor reaches the network through child processes (`git.exe`, `gh.exe`, `curl.exe`), each with its own firewall identity. That is an operating-system change and belongs to the operator, not to this repository.
+
+A candidate account measured by the autoresearch session: `curl` fails to connect in 29 ms, `git ls-remote` in 73 ms, `gh auth status` reports no authentication. One caveat — a blanket outbound block also stops agy reaching Gemini, so a real agy unit needs the rule narrowed to GitHub's published ranges.
+
+**Path enforcement stays with the orchestrator regardless.** Both executors have been observed ignoring their declared scope, so `validate-result.sh` diffs the candidate commit and rejects — and as of 2026-07-26 it fails *closed* when no scope is declared, which it previously did not.
+
+### 21.9 Executor isolation — the remaining operator task
+
+§21.8 closed the gate. **Egress is still open**, and closing it needs a control at the operating-system layer, because everything weaker has been tried and observed to fail:
 
 - **Prompt instruction** — tier 3. Observed insufficient: the executor wrote outside `allowed_paths` when asked not to, on both routes.
 - **`--sandbox`** — observed to restrict neither network, credentials, nor paths.
@@ -1054,7 +1089,7 @@ One caveat that matters: a blanket outbound block also stops agy reaching Gemini
 
 **Path enforcement stays with the orchestrator regardless.** Both executors have now been observed ignoring `allowed_paths`, so the orchestrator diffs the candidate commit and rejects — which is what §8.3 already argued, and is the part of that section that survives the correction intact.
 
-### 21.9 The lesson this subsystem taught
+### 21.10 The lesson this subsystem taught
 
 Twice, a CI check was green **because it was not looking**: the shellcheck glob missed `scripts/telemetry/` entirely, then the model-name check omitted `*.py`. And the first ledger unit passed its own 5/5 self-check while being completely broken on real provider data — the fixtures and the implementation shared one misunderstanding, so the test could not see it.
 
