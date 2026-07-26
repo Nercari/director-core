@@ -26,14 +26,20 @@ routes:
     version_seen: 1.1.7
     auth: subscription          # Google AI Pro, OAuth
     model: gemini-3.6-flash-medium
-    invoke: scripts/exec-jail.sh agy -p --sandbox --mode accept-edits --print-timeout 15m
+    # DO NOT COPY THIS AS A WORKING COMMAND. There is deliberately no runnable
+    # invoke: key on this route. The command below is recorded as EVIDENCE of what
+    # was probed and found non-functional, not as an instruction.
+    invoke_NON_FUNCTIONAL_do_not_use: "scripts/exec-jail.sh agy -p --sandbox --mode accept-edits --print-timeout 15m"
+    invoke_probe_result: "no output, no work, exit without executing — every tool permission auto-denied in headless mode"
     # CORRECTED 2026-07-26. This previously read "network: denied" and that was
     # false. A conformance probe proved agy under --sandbox reaches the public
     # network AND holds live gh credentials with repo+workflow scope, and writes
     # outside allowed_paths. --sandbox restricted none of it.
     network: EGRESS_OPEN                 # DNS + public reads work. Not closed.
     gate_credentials: REMOVED_BY_EXEC_JAIL
-    quarantined: false                   # gate closed 2026-07-26; see enforcement below
+    quarantined: true                    # NOT USABLE — see blocked_on below
+    blocked_on: "Headless agy auto-denies every tool permission. Probed 2026-07-26 with the invoke line above: 'a tool required the command permission that headless mode cannot prompt for, so it was auto-denied'. It produced no output and did no work. Making it functional needs --dangerously-skip-permissions, which auto-approves ALL tools. Combined with open egress and this route's observed scope violations that is worse than EXEC_STRONG, which runs sandboxed with no bypass flag at all. Unblock order: close egress (21.9), then re-probe the jail against agy, then reconsider."
+    jail_verified: false                 # exec-jail was proven against codex, NOT against agy
     enforcement: "scripts/exec-jail.sh empties GH_CONFIG_DIR and nulls git config, so gh is unauthenticated and push cannot authenticate. Probed inside a live jailed codex run, not inferred. MUST be invoked through the jail — the invoke line above is the control."
     residual_risk: "Egress is open, so an executor can still fetch and could exfiltrate. Closing that needs the account-scoped firewall rule in blueprint 21.8, which is an operator task."
     forbidden_models:           # agy can serve these; doing so destroys Layer 2
@@ -58,7 +64,8 @@ routes:
     quarantined: false                   # gate closed 2026-07-26 via exec-jail
     enforcement: "Same control as EXEC_PRIMARY. Verified in a live jailed run: gh unauthenticated, gh api refused, push cannot authenticate."
     residual_risk: "Egress open. See blueprint 21.8."
-    use: escalation only, on a named capability delta; also the State C executor
+    use: "DE FACTO PRIMARY as of 2026-07-26. Eleven units have run here; zero on EXEC_PRIMARY. It is the only executor that works headlessly without a permission-bypass flag. Escalation semantics are retained for when EXEC_PRIMARY becomes usable."
+    jail_verified: true                  # probed live 2026-07-26: gh dead, push cannot authenticate
     last_verified: 2026-07-26
 
   EXEC_LOCAL:

@@ -70,3 +70,32 @@ The lesson is the same one as the shellcheck glob and the model-name include
 list: **an unexercised check is an unknown check.** Three of tonight's defects
 were checks that reported success by not looking. Writing a gate and running a
 gate are different acts.
+
+## EXEC_PRIMARY declared but never functional, found 2026-07-26
+
+`routes.yaml` named agy as the primary executor and codex as escalation-only.
+Eleven units ran. **All eleven went to codex. Zero went to agy.** The registry
+and the practice had disagreed since the day it was written, and nobody noticed
+because the config was never exercised.
+
+Probed with the exact configured invoke line:
+
+    agy -p --sandbox --mode accept-edits --print-timeout 5m
+    -> "a tool required the command permission that headless mode cannot
+        prompt for, so it was auto-denied"
+
+No output. No work done. The route could never have executed anything.
+
+Making it work needs `--dangerously-skip-permissions`, which auto-approves every
+tool. With egress still open and this route already observed writing outside its
+declared scope, that is worse than the escalation route, which runs sandboxed
+with no bypass flag at all.
+
+**The pattern, fourth instance today:** a declaration nobody exercised. The
+shellcheck glob, the model-name include list, `validate-result.sh`'s scope check,
+and now an entire executor route. Each looked correct in the file and did nothing
+in practice.
+
+Corrected by describing what is true — agy blocked with the unblock order
+recorded, codex marked de facto primary — rather than by adjusting practice to
+match an aspiration.

@@ -43,7 +43,7 @@ Three verification layers, valuable because they **fail differently from one ano
 
 **What follows.** The highest-leverage work is not review — it is **writing the specification as observable behaviors before any code exists**. A criterion you cannot observe is a criterion no layer can verify.
 
-**Layer 2 is now preserved under degradation.** 10.1 accepted that losing the primary orchestrator collapsed reviewer and executor into one model. With three vendors available (§7.1) that is no longer true, and §7.4 is rebuilt accordingly. The one state where Layer 2 genuinely becomes self-review is named, and auto-merge is forbidden there.
+**Layer 2 is now preserved under degradation.** 10.1 accepted that losing the primary orchestrator collapsed reviewer and executor into one model. With three vendors available (§7.1) that is no longer true, and §7.5 is rebuilt accordingly. The one state where Layer 2 genuinely becomes self-review is named, and auto-merge is forbidden there.
 
 ---
 
@@ -55,7 +55,7 @@ Three verification layers, valuable because they **fail differently from one ano
 | 2 | **The reusable core moved out of the vault** into its own repository (§6.1, §11) | 10.1's §15.1 hook made the vault read-only outside one inbox path, while §11.3 required core artefacts to be improved in the vault. The orchestrator could never have improved its own core |
 | 3 | **The executor gets no network** (§8.3, §9, §15.1) | Hooks are Claude Code `PreToolUse` hooks. They fire on the orchestrator's tool calls and are invisible to a subprocess. 10.1's `output_contract` required the executor to push and open a PR — handing the gate's bypass to the least supervised process |
 | 4 | **agy restored as a route** (§7.1, Appendix A) | 10.1 listed it Known-broken. Tested: `agy -p` exits 0 and prints correctly under non-TTY. The deletion rested on a false claim, and it contradicted a standing operator rule mandating delegation to that route |
-| 5 | **Degradation ladder reordered** (§7.4) | 10.1 warned that one state lost Layer 2 and waved through a worse state that lost it to *self*-review. Escalating to a third vendor is now tried before going DIRECT |
+| 5 | **Degradation ladder reordered** (§7.5) | 10.1 warned that one state lost Layer 2 and waved through a worse state that lost it to *self*-review. Escalating to a third vendor is now tried before going DIRECT |
 | 6 | **`gh pr merge` hook narrowed** (§15.1) | 10.1's hook blocked `gh pr merge` outright. Auto-merge is armed with `gh pr merge --auto`. §15.1 blocked §9.4 |
 | 7 | **Optimizing metric dropped; thresholds kept** (§13.3) | A weekly counting ritual is machinery for a decision months away. §13.3's own rule forbids it. The baseline was taken retrospectively from git history instead |
 | 8 | **Parallelism split by evidence** (§16, §17) | The measured failure is concurrent *writers* losing work. 10.1's wording forbade concurrent readers too, which the evidence does not support and which costs a solo operator real speed |
@@ -188,7 +188,8 @@ routes:
     tool: agy -p                    # 1.1.7
     auth: subscription              # Google AI Pro, OAuth
     model: gemini-3.6-flash-medium
-    flags: --sandbox --mode accept-edits --print-timeout <matches outer timeout>
+    invoke: NONE — this route has no working invocation (see §7.4). Probed flags
+            `--sandbox --mode accept-edits` auto-deny every tool in headless mode.
     network: REACHABLE_NOT_ENFORCED # probed 2026-07-26; see §8.3 correction, §21.8
     gate_credentials: REACHABLE     # gh keyring visible to the executor
     quarantined: true               # do not route work here until enforced
@@ -239,7 +240,31 @@ So the registry is filled from, in order of preference: **what the CLI reports**
 
 10.1 is the cautionary example: it recorded a working route as permanently broken, on recall, and deleted it. One 45-second test reversed that.
 
-### 7.4 Capacity-aware routing
+### 7.4 A route that was declared and never worked
+
+`EXEC_PRIMARY` named agy as the cheap primary executor and `EXEC_STRONG` as escalation-only. Eleven units ran. **All eleven went to `EXEC_STRONG`. Zero went to `EXEC_PRIMARY`.** The registry and the practice had disagreed since the day the registry was written, and nobody noticed because the configuration was never exercised.
+
+Probed 2026-07-26 with the exact configured flags:
+
+```
+agy -p --sandbox --mode accept-edits --print-timeout 5m "<task>"
+→ "a tool required the command permission that headless mode cannot
+   prompt for, so it was auto-denied"
+```
+
+No output. No work. **The route could never have executed anything.** An orchestrator delegating to it would receive exit 0 and an empty result, which is the worst possible failure shape: silence that looks like success.
+
+Making it functional needs `--dangerously-skip-permissions`, which auto-approves every tool. With egress still open (§21.9) and this route already observed writing outside its declared scope, that is strictly worse than `EXEC_STRONG`, which executes headlessly under `--sandbox` with no bypass flag at all.
+
+**So the registry now says what is true:** `EXEC_PRIMARY` is quarantined with `blocked_on` recorded and **no runnable `invoke:` key at all** — the probed command is kept only under `invoke_NON_FUNCTIONAL_do_not_use`, because a broken command string sitting in a field named `invoke` is an invitation. `EXEC_STRONG` is marked de facto primary.
+
+Unblock order, if agy is ever wanted: close egress (§21.9), re-probe `exec-jail` against agy specifically — §21.8's proof covers codex only — then reconsider.
+
+**The general lesson, and it is the fourth instance of it in one day:** the shellcheck glob that skipped a directory, the model-name check that skipped a file type, `validate-result.sh`'s scope check that skipped when undeclared, and now an entire executor route. Each was correct in the file and did nothing in practice.
+
+> A configuration nobody exercised is a hypothesis, not a configuration.
+
+### 7.5 Capacity-aware routing
 
 | State | Orchestrator | Executor | Layer 2 | Auto-merge |
 |---|---|---|---|---|
@@ -494,7 +519,7 @@ No model decides. A **check** decides, and only for changes it fully covers.
 2. **Opened by the orchestrator on your behalf.** Never a stranger's PR, ever.
 3. Every required check green.
 4. The diff touches none of: `.github/**`, `.claude/hooks/**`, `.claude/settings*.json`, `AGENTS.md`, `CLAUDE.md`, `.director/routes.yaml`, `scripts/**`. **A change to the enforcement layer is never green-path.**
-5. Capacity state A, B, or C. **Never C′** — Layer 2 is self-review there (§7.4).
+5. Capacity state A, B, or C. **Never C′** — Layer 2 is self-review there (§7.5).
 6. **`route_used` is not `EXEC_LOCAL`** while that route's `state: candidate` (§17.1).
 
 **Public-repo hardening, all free:** pin every action by full commit SHA; require manual approval for first-time-contributor workflow runs; enable Dependabot and the dependency-review action; CODEOWNERS on `.github/**`.
@@ -553,7 +578,7 @@ Kept apart because a change can satisfy every convention and still do the wrong 
 
 **Review is never delegated to `EXEC_LOCAL`.** See §17.1 — low correlation times low capability is not a useful reviewer.
 
-**Review is never performed by a model from the executor's vendor.** Enforced by `forbidden_models` (§7.1) and by refusing auto-merge in state C′ (§7.4).
+**Review is never performed by a model from the executor's vendor.** Enforced by `forbidden_models` (§7.1) and by refusing auto-merge in state C′ (§7.5).
 
 ---
 
@@ -792,9 +817,12 @@ git worktree add -b task/<unit-id> ../director-core-<unit-id> main
 cd ../director-core-<unit-id>
 git commit --allow-empty -m "checkpoint before <unit-id>"   # recovery point
 
-# 2. Executor works here — sandboxed, no network, always time-bounded,
-#    always the route in the packet, inner timeout >= outer bound
-timeout 900 agy -p --sandbox --mode accept-edits --print-timeout 15m "<packet>"
+# 2. Executor works here — jailed (§21.8), always time-bounded, always the
+#    route in the packet, inner timeout >= outer bound.
+#    This shows EXEC_STRONG because it is the only route that executes headlessly
+#    without a permission-bypass flag. EXEC_PRIMARY has NO working invocation
+#    (§7.5) — do not substitute agy here expecting it to work.
+timeout 900 bash scripts/exec-jail.sh codex exec --sandbox workspace-write   --json --output-schema schemas/result.schema.json "<packet>"
 
 # 3. Validate before anything leaves the machine
 bash scripts/validate-result.sh
