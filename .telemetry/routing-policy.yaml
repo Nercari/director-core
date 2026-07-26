@@ -1,0 +1,54 @@
+# Deliberate operator action is required to change this to enforcing.  Do not
+# promote automatically: the empty ledger must first collect comparable runs.
+policy_version: 1
+mode: advisory
+
+comparison_scope:
+  - same_task_class
+  - similar_complexity_band
+  - same_validation_standard
+
+eligibility:
+  minimum_completed_samples: 10
+  minimum_validated_success_rate: 0.90
+
+objective:
+  primary: lowest_cost_per_validated_success
+  fallback: lowest_tokens_per_validated_success
+
+tie_breakers:
+  - lowest_retry_rate
+  - lowest_human_intervention_rate
+  - lowest_p95_latency
+  - lowest_director_overhead_ratio
+
+exploration:
+  enabled: true
+  percentage: 10
+
+# The operator uses subscriptions, so quota is the accounting currency and
+# estimated_cost remains null unless the operator deliberately changes modes.
+accounting_mode: subscription_quota
+
+# These stable workflow-shape IDs reference capability aliases from
+# .director/routes.yaml.  They intentionally do not name concrete models.
+route_ids:
+  director-primary_executor-primary:
+    orchestrator: ORCH_PRIMARY
+    executor: EXEC_PRIMARY
+  director-primary_executor-strong:
+    orchestrator: ORCH_PRIMARY
+    executor: EXEC_STRONG
+  direct-orchestrator:
+    orchestrator: ORCH_PRIMARY
+    executor: DIRECT
+  primary-then-strong-escalation:
+    orchestrator: ORCH_PRIMARY
+    executor: EXEC_PRIMARY
+    escalation_executor: EXEC_STRONG
+  batch-primary:
+    orchestrator: ORCH_PRIMARY
+    executor: EXEC_PRIMARY
+  interactive-primary:
+    orchestrator: ORCH_PRIMARY
+    executor: EXEC_PRIMARY
