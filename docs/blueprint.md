@@ -1010,7 +1010,7 @@ It **advises** remediation in order — trim history, trim tool definitions, pre
 ### 21.7 What it cannot do yet
 
 - **Zero real completed runs.** Every honest answer today is "insufficient samples". The seeded comparison proves the mechanism, not any real route's superiority.
-- **The ledger append lock is process-local.** Two executors are two processes. Multi-process writer safety is unproven and needs cross-process coordination before anyone relies on it.
+- **Each physical JSONL append is protected across threads and local processes.** `threading.Lock` serializes adapters within one interpreter, while an atomic lock directory beside the target JSONL serializes separate interpreter processes. Acquisition waits at most two seconds; a directory at least four seconds old is treated as abandoned, removed with a warning, and retried. A timeout fails loudly with the lock path rather than writing unlocked. This is not a transaction across the ledger and its separate hash index, and it is not a guarantee on network filesystems or for a live process paused longer than the stale-lock threshold.
 - **agy contributes no usage data at all**, so any workflow routing through it is measured with a hole in it.
 
 ### 21.8 The lesson this subsystem taught
