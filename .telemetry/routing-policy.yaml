@@ -30,6 +30,15 @@ exploration:
 # estimated_cost remains null unless the operator deliberately changes modes.
 accounting_mode: subscription_quota
 
+# This is a planning guardrail, not a provider measurement. The preflight
+# script reads this budget before an executor dispatch and records only an
+# explicitly labelled estimate.
+preflight_policy:
+  default_budget: 12000
+  task_class_budgets:
+    bounded-code-change: 12000
+    default: 12000
+
 # These stable workflow-shape IDs reference capability aliases from
 # .director/routes.yaml.  They intentionally do not name concrete models.
 route_ids:
