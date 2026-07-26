@@ -6,7 +6,8 @@ events. For Codex, event timestamps and model identifiers take precedence;
 the command-line values are fallbacks, for example:
 
   bash scripts/telemetry/ingest.sh --source codex --input rollout.jsonl \\
-    --project-id director-core --work-unit-id UNIT-1 --model gpt-5 \\
+    --project-id director-core --work-unit-id UNIT-1 \\
+    --model "$(model for EXEC_STRONG from .director/routes.yaml)" \\
     --started-at 2026-07-25T12:00:00Z
 """
 

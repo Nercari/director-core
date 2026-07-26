@@ -33,7 +33,8 @@ jobs:
           # *.yaml as well as *.yml — routes.yaml is a .yaml file, so without it
           # the exclusion below would be dead and the check would scan nothing.
           hits=$(grep -rlE "gemini-[0-9]|claude-(opus|sonnet|haiku)-[0-9]|gpt-[0-9]" \
-                   --include="*.sh" --include="*.yml" --include="*.yaml" --include="*.json" . \
+                   --include="*.sh" --include="*.yml" --include="*.yaml" --include="*.json" \
+                   --include="*.py" . \
                  | grep -v "^\./\.director/routes\.yaml$" \
                  | grep -v "^\./\.github/workflows/gate\.yml$" || true)
           if [ -n "$hits" ]; then echo "Model names outside routes.yaml: $hits"; exit 1; fi
