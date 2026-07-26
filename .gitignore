@@ -8,6 +8,7 @@
 # Local telemetry ledger state — never committed
 .telemetry/*.jsonl
 .telemetry/*.sqlite
+.telemetry/example/
 
 # Python bytecode
 __pycache__/

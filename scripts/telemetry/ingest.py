@@ -17,6 +17,7 @@ import argparse
 import hashlib
 import json
 import sys
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +32,12 @@ TOKEN_FIELDS = (
     "reasoning_output_tokens",
     "total_tokens",
 )
+
+
+# One process can receive concurrent adapter writes.  Serialize each physical
+# JSONL append so a complete line is never lost or interleaved.  The ledger is
+# append-only; the lock intentionally covers only one file write at a time.
+APPEND_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -342,8 +349,9 @@ class Ledger:
 
     @staticmethod
     def _append(path: Path, value: Any) -> None:
-        with path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(json_line(value) + "\n")
+        with APPEND_LOCK:
+            with path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(json_line(value) + "\n")
 
     def append(self, key: str, record: dict[str, Any]) -> bool:
         if key in self.keys:
