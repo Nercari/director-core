@@ -116,6 +116,20 @@ else
       fail "$alias has no resolved model"
     fi
 
+    forbidden_models="$(echo "$block" | awk '
+      /^    forbidden_models:/ { in_forbidden=1; next }
+      in_forbidden && /^    [a-zA-Z_][a-zA-Z0-9_]*:/ { exit }
+      in_forbidden { sub(/^[[:space:]]*-[[:space:]]*/, ""); sub(/[[:space:]]*#.*/, ""); gsub("\"", ""); print }
+    ')"
+    while IFS= read -r forbidden_pattern; do
+      [ -z "$forbidden_pattern" ] && continue
+      case "$model" in
+        $forbidden_pattern)
+          fail "$alias model $model matches forbidden_models pattern $forbidden_pattern"
+          ;;
+      esac
+    done <<< "$forbidden_models"
+
     if [ "$alias" = "EXEC_LOCAL" ]; then
       state="$(echo "$block" | field state)"
       case "$state" in
@@ -132,11 +146,15 @@ else
       if [ "$lv_epoch" -eq 0 ]; then
         fail "$alias last_verified unparseable: $lv"
       else
-        age_days=$(((TODAY_EPOCH - lv_epoch) / 86400))
+        if [ "$lv_epoch" -gt "$TODAY_EPOCH" ]; then
+          fail "$alias last_verified is in the future: $lv"
+        else
+          age_days=$(((TODAY_EPOCH - lv_epoch) / 86400))
         if [ "$age_days" -gt 180 ]; then
           fail "$alias last_verified is ${age_days}d old (>180) — re-run the routing interview"
         elif [ "$age_days" -gt 90 ]; then
           warn "$alias last_verified is ${age_days}d old (>90)"
+        fi
         fi
       fi
     fi

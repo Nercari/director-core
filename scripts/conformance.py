@@ -22,6 +22,8 @@ from typing import Iterable, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 VALIDATOR_SOURCE = ROOT / "scripts" / "validate-result.sh"
+WORKTREE_SOURCE = ROOT / "scripts" / "worktree.sh"
+PREFLIGHT_SOURCE = ROOT / "scripts" / "preflight.sh"
 JAIL = ROOT / "scripts" / "exec-jail.sh"
 BASH = shutil.which("bash")
 
@@ -151,6 +153,9 @@ class ValidatorFixture:
         }
         write_text(self.run_directory / "result.json", json.dumps(result) + "\n")
 
+    def write_raw_result(self, result: dict[str, object]) -> None:
+        write_text(self.run_directory / "result.json", json.dumps(result) + "\n")
+
     def validate(self) -> Command:
         if BASH is None:
             raise RuntimeError("bash is required to execute scripts/validate-result.sh")
@@ -207,6 +212,163 @@ def scenario_three() -> tuple[bool, str]:
                 fixture,
                 "required tests declared but none run, and no blocker reported â€” REJECT",
             )
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
+def scenario_defect_one_lock_owner() -> tuple[bool, str]:
+    """Removing beta must not release the lock created by alpha."""
+    if BASH is None:
+        return False, "bash is required to exercise scripts/worktree.sh"
+    try:
+        with tempfile.TemporaryDirectory(prefix="director-worktree-lock-") as temporary:
+            temp = Path(temporary)
+            root = temp / "fixture-repository"
+            worktree_script = root / "scripts" / "worktree.sh"
+            root.mkdir()
+            worktree_script.parent.mkdir()
+            (root / ".director").mkdir()
+            shutil.copy2(WORKTREE_SOURCE, worktree_script)
+            checked(["git", "init", "--initial-branch=main", str(root)])
+            checked(["git", "-C", str(root), "config", "user.email", "conformance@example.invalid"])
+            checked(["git", "-C", str(root), "config", "user.name", "Conformance fixture"])
+            write_text(root / "README.md", "fixture main branch\n")
+            checked(["git", "-C", str(root), "add", "README.md"])
+            checked(["git", "-C", str(root), "commit", "-m", "fixture base"])
+
+            created = run([BASH, str(worktree_script), "create", "alpha"], root)
+            if created.returncode != 0:
+                return False, f"could not create alpha fixture worktree: {created.output}"
+            removed = run([BASH, str(worktree_script), "remove", "beta"], root)
+            lock = root / ".director" / "worktree.lock"
+            if not lock.is_dir():
+                return False, "removing beta released alpha's lock"
+            if "belongs to alpha" not in removed.output:
+                return False, "removing beta did not report the lock owner"
+            cleaned = run([BASH, str(worktree_script), "remove", "alpha"], root)
+            if cleaned.returncode != 0:
+                return False, f"could not clean alpha fixture worktree: {cleaned.output}"
+            return True, "beta cannot release alpha's owned lock"
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
+def scenario_defect_two_missing_base_commit() -> tuple[bool, str]:
+    try:
+        with ValidatorFixture("missing-base-commit") as fixture:
+            candidate = fixture.commit_files({"allowed.txt": "within declared scope\n", "FORBIDDEN.txt": "outside declared scope\n"})
+            fixture.write_packet(["allowed.txt"], ["test -f allowed.txt"])
+            write_text(fixture.run_directory / "worktree.yaml", "unit_id: missing-base-commit\n")
+            fixture.write_result(candidate, ["test -f allowed.txt"])
+            return expect_validator_reject(
+                fixture, "base_commit is missing or empty â€” REJECT"
+            )
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
+def scenario_defect_three_result_invariants() -> tuple[bool, str]:
+    cases = (
+        ("unknown-status", {"status": "not-completed"}, "status=not-completed is not allowed â€” REJECT"),
+        ("bad-branch", {"status": "blocked", "branch": "main", "route_used": "DIRECT"}, "branch=main does not match task/<unit-id> â€” REJECT"),
+        ("missing-route", {"status": "blocked", "branch": "task/missing-route"}, "route_used is missing or empty â€” REJECT"),
+        ("forbidden-key", {"status": "blocked", "branch": "task/forbidden-key", "route_used": "DIRECT", "pull_request_url": "https://example.invalid/pr/1"}, "result contains forbidden key pull_request_url â€” REJECT"),
+    )
+    try:
+        for unit, result, expected in cases:
+            with ValidatorFixture(unit) as fixture:
+                fixture.write_raw_result(result)
+                passed, reason = expect_validator_reject(fixture, expected)
+                if not passed:
+                    return False, f"{unit}: {reason}"
+        return True, "fallback validation rejects invalid status, branch, route, and forbidden keys"
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
+def preflight_fixture_routes(primary_block: str) -> str:
+    return f"""routes:
+  ORCH_PRIMARY:
+    model: default
+    last_verified: 2026-07-26
+  ORCH_FALLBACK:
+    model: default
+    last_verified: 2026-07-26
+  EXEC_PRIMARY:
+{primary_block}
+  EXEC_STRONG:
+    model: default
+    last_verified: 2026-07-26
+  EXEC_LOCAL:
+    model: local
+    state: absent
+    last_verified: 2026-07-26
+"""
+
+
+def run_preflight_fixture(primary_block: str) -> Command:
+    if BASH is None:
+        raise RuntimeError("bash is required to exercise scripts/preflight.sh")
+    with tempfile.TemporaryDirectory(prefix="director-preflight-") as temporary:
+        temp = Path(temporary)
+        root = temp / "fixture-repository"
+        scripts = root / "scripts"
+        fake_bin = temp / "bin"
+        scripts.mkdir(parents=True)
+        fake_bin.mkdir()
+        shutil.copy2(PREFLIGHT_SOURCE, scripts / "preflight.sh")
+        write_text(root / ".director" / "routes.yaml", preflight_fixture_routes(primary_block))
+        checked(["git", "init", "--initial-branch=main", str(root)])
+        checked(["git", "-C", str(root), "config", "user.email", "conformance@example.invalid"])
+        checked(["git", "-C", str(root), "config", "user.name", "Conformance fixture"])
+        write_text(root / "README.md", "fixture\n")
+        checked(["git", "-C", str(root), "add", "README.md"])
+        checked(["git", "-C", str(root), "commit", "-m", "fixture base"])
+        write_text(fake_bin / "codex", "#!/usr/bin/env bash\necho 'Logged in using ChatGPT'\n")
+        write_text(fake_bin / "claude", "#!/usr/bin/env bash\nexit 0\n")
+        write_text(fake_bin / "agy", "#!/usr/bin/env bash\nexit 0\n")
+        write_text(fake_bin / "gh", "#!/usr/bin/env bash\nif [ \"$1\" = auth ]; then exit 0; fi\nif [ \"$1\" = api ]; then echo 'X-Oauth-Scopes: repo, workflow'; exit 0; fi\nexit 1\n")
+        for executable in fake_bin.iterdir():
+            executable.chmod(0o755)
+        env = os.environ.copy()
+        env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+        completed = subprocess.run(
+            [BASH, str(scripts / "preflight.sh")],
+            cwd=str(root),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=45,
+            check=False,
+            env=env,
+        )
+        return Command(completed.returncode, completed.stdout)
+
+
+def scenario_defect_four_forbidden_model() -> tuple[bool, str]:
+    try:
+        result = run_preflight_fixture(
+            "    model: claude-3-7-sonnet\n    forbidden_models:\n      - \"claude-*\"\n    last_verified: 2026-07-26\n"
+        )
+        if result.returncode == 0:
+            return False, "preflight accepted a model matching its forbidden_models pattern"
+        if "claude-3-7-sonnet matches forbidden_models pattern claude-*" not in result.output:
+            return False, "preflight did not name the forbidden model and pattern"
+        return True, "preflight rejects a forbidden executor model"
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
+def scenario_defect_five_future_verification() -> tuple[bool, str]:
+    try:
+        result = run_preflight_fixture(
+            "    model: gemini-fixture\n    last_verified: 2099-01-01\n"
+        )
+        if result.returncode == 0:
+            return False, "preflight accepted a future last_verified date"
+        if "EXEC_PRIMARY last_verified is in the future: 2099-01-01" not in result.output:
+            return False, "preflight did not identify the future verification date"
+        return True, "preflight rejects a future last_verified date"
     except Exception as error:
         return False, f"fixture could not be built or exercised: {error}"
 
@@ -380,6 +542,11 @@ def main() -> int:
         scenario_three(),
         scenario_four(),
         scenario_five(),
+        scenario_defect_one_lock_owner(),
+        scenario_defect_two_missing_base_commit(),
+        scenario_defect_three_result_invariants(),
+        scenario_defect_four_forbidden_model(),
+        scenario_defect_five_future_verification(),
     )
     all_passed = True
     for index, (passed, reason) in enumerate(outcomes, 1):

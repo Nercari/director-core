@@ -37,12 +37,37 @@ if command -v check-jsonschema >/dev/null 2>&1; then
     fail "result.json violates schemas/result.schema.json"
   fi
 else
-  echo "  [SKIP]  check-jsonschema not installed (CI enforces it)"
+  echo "  [SKIP]  check-jsonschema not installed; enforcing critical schema invariants locally"
 fi
 
 status="$(jq -r '.status' "$RESULT")"
 commit="$(jq -r '.candidate_commit // "null"' "$RESULT")"
 route="$(jq -r '.route_used' "$RESULT")"
+
+# check-jsonschema is optional on this host. These gate-critical schema
+# invariants are enforced here as well, so a missing validator never widens
+# what an executor can claim.
+case "$status" in
+  completed | blocked | failed) pass "status=$status is allowed" ;;
+  *) fail "status=$status is not allowed — REJECT" ;;
+esac
+
+branch="$(jq -r '.branch // ""' "$RESULT")"
+if [ -z "$branch" ] || [[ "$branch" == *$'\n'* ]] || ! [[ "$branch" =~ ^task/[a-z0-9][a-z0-9-]*$ ]]; then
+  fail "branch=${branch:-<missing>} does not match task/<unit-id> — REJECT"
+else
+  pass "branch=$branch matches task/<unit-id>"
+fi
+
+if [ -z "$route" ] || [ "$route" = "null" ]; then
+  fail "route_used is missing or empty — REJECT"
+fi
+
+for forbidden_key in pull_request_url branch_pushed; do
+  if jq -e "has(\"$forbidden_key\")" "$RESULT" >/dev/null 2>&1; then
+    fail "result contains forbidden key $forbidden_key — REJECT"
+  fi
+done
 
 # A "completed" with no commit is the first conformance scenario. Reject.
 if [ "$status" = "completed" ]; then
@@ -53,13 +78,22 @@ if [ "$status" = "completed" ]; then
   else
     fail "candidate_commit $commit does not exist in the worktree — REJECT"
   fi
-else
+elif [ "$status" = "blocked" ] || [ "$status" = "failed" ]; then
   pass "status=$status (no commit required)"
 fi
 
 # main must be untouched. The executor works on a branch, in a worktree, only.
 main_before="$(sed -n 's/^base_commit: *//p' "$RUN/worktree.yaml" 2>/dev/null)"
 main_now="$(git -C "$ROOT" rev-parse main 2>/dev/null)"
+base_valid=0
+if [ -z "$main_before" ]; then
+  fail "base_commit is missing or empty — REJECT"
+elif ! git -C "$WT" cat-file -e "$main_before^{commit}" 2>/dev/null; then
+  fail "base_commit $main_before is not a commit in the worktree — REJECT"
+else
+  base_valid=1
+  pass "base_commit $main_before exists in the worktree"
+fi
 if [ -n "$main_before" ] && [ "$main_before" != "$main_now" ]; then
   fail "main moved during the unit ($main_before -> $main_now) — REJECT"
 else
@@ -80,7 +114,7 @@ if [ "$commit" != "null" ]; then
   fi
 fi
 
-if [ -f "$PACKET" ] && [ "$commit" != "null" ]; then
+if [ -f "$PACKET" ] && [ "$commit" != "null" ] && [ "$base_valid" -eq 1 ]; then
   changed="$(git -C "$WT" diff --name-only "$main_before" "$commit" 2>/dev/null)"
   allowed="$(sed -n '/^allowed_paths:/,/^[a-z_]*:/p' "$PACKET" | sed -n 's/^ *- *//p')"
   if [ -z "$allowed" ]; then
@@ -117,7 +151,7 @@ else
   pass "executor did not report reaching the gate (tripwire only — not proof)"
 fi
 
-if jq -e '.route_used' "$RESULT" >/dev/null 2>&1; then
+if [ -n "$route" ] && [ "$route" != "null" ]; then
   if grep -q "$route" "$ROOT/.director/routes.yaml" 2>/dev/null \
     || [ "$route" = "DIRECT" ]; then
     pass "route_used=$route is authorised"
