@@ -123,11 +123,12 @@ else
     ')"
     while IFS= read -r forbidden_pattern; do
       [ -z "$forbidden_pattern" ] && continue
+      # Glob matching is the point: a vendor wildcard pattern must match that
+      # vendor's concrete model identifiers. Quoting the expansion makes the
+      # comparison literal and the check would never fire. The directive belongs
+      # in front of the whole case, not a branch (SC1124).
+      # shellcheck disable=SC2254
       case "$model" in
-        # shellcheck disable=SC2254  # glob matching is the point: a vendor
-        # wildcard pattern must match that vendor's concrete model identifiers.
-        # Quoting it makes the comparison literal and the check never fires.
-        # No concrete model name may appear here — the gate scans *.sh for them.
         $forbidden_pattern)
           fail "$alias model $model matches forbidden_models pattern $forbidden_pattern"
           ;;
