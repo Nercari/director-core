@@ -124,6 +124,9 @@ else
     while IFS= read -r forbidden_pattern; do
       [ -z "$forbidden_pattern" ] && continue
       case "$model" in
+        # shellcheck disable=SC2254  # glob matching is the point: the pattern
+        # "claude-*" must match claude-opus-4-6-thinking. Quoting it would make
+        # the comparison literal and the check would never fire.
         $forbidden_pattern)
           fail "$alias model $model matches forbidden_models pattern $forbidden_pattern"
           ;;
