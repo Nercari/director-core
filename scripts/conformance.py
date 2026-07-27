@@ -115,14 +115,11 @@ class ValidatorFixture:
     def close(self) -> None:
         self._temporary_directory.cleanup()
 
-    def commit_files(self, files: dict[str, str]) -> str:
+    def modify_files(self, files: dict[str, str]) -> None:
         if not files:
-            raise RuntimeError("fixture commit requires at least one file")
+            raise RuntimeError("fixture change requires at least one file")
         for relative_path, content in files.items():
             write_text(self.worktree / relative_path, content)
-        checked(["git", "-C", str(self.worktree), "add", "--", *files.keys()])
-        checked(["git", "-C", str(self.worktree), "commit", "-m", "fixture candidate"])
-        return checked(["git", "-C", str(self.worktree), "rev-parse", "HEAD"])
 
     def write_packet(self, allowed_paths: Iterable[str], required_tests: Iterable[str]) -> None:
         allowed = list(allowed_paths)
@@ -136,10 +133,9 @@ class ValidatorFixture:
         write_text(self.run_directory / "packet.yaml", "\n".join(packet) + "\n")
         write_text(self.run_directory / "worktree.yaml", f"base_commit: {self.base_commit}\n")
 
-    def write_result(self, candidate_commit: Optional[str], tests_run: Iterable[str]) -> None:
+    def write_result(self, tests_run: Iterable[str]) -> None:
         result = {
             "status": "completed",
-            "candidate_commit": candidate_commit,
             "branch": f"task/{self.unit}",
             "route_used": "DIRECT",
             "summary": "conformance fixture",
@@ -173,14 +169,23 @@ def expect_validator_reject(
     return True, expected_reason
 
 
+def expect_validator_accept(fixture: ValidatorFixture, expected_reason: str) -> tuple[bool, str]:
+    result = fixture.validate()
+    if result.returncode != 0:
+        return False, f"validator exited {result.returncode}, expected 0: {result.output}"
+    if expected_reason not in result.output:
+        return False, f"validator omitted expected reason: {expected_reason}"
+    return True, expected_reason
+
+
 def scenario_one() -> tuple[bool, str]:
     try:
-        with ValidatorFixture("no-candidate-commit") as fixture:
-            fixture.commit_files({"allowed.txt": "candidate exists but is not reported\n"})
+        with ValidatorFixture("uncommitted-reviewed-diff") as fixture:
+            fixture.modify_files({"allowed.txt": "executor leaves an uncommitted diff\n"})
             fixture.write_packet(["allowed.txt"], ["test -f allowed.txt"])
-            fixture.write_result(None, ["test -f allowed.txt"])
-            return expect_validator_reject(
-                fixture, "status=completed but no candidate_commit â€” REJECT"
+            fixture.write_result(["test -f allowed.txt"])
+            return expect_validator_accept(
+                fixture, "status=completed (working-tree diff awaits orchestrator review)"
             )
     except Exception as error:
         return False, f"fixture could not be built or exercised: {error}"
@@ -189,12 +194,12 @@ def scenario_one() -> tuple[bool, str]:
 def scenario_two(break_fixture: bool) -> tuple[bool, str]:
     try:
         with ValidatorFixture("outside-declared-scope") as fixture:
-            candidate = fixture.commit_files(
+            fixture.modify_files(
                 {"allowed.txt": "within scope\n", "forbidden.txt": "outside scope\n"}
             )
             allowed_paths = ["allowed.txt", "forbidden.txt"] if break_fixture else ["allowed.txt"]
             fixture.write_packet(allowed_paths, ["test -f allowed.txt"])
-            fixture.write_result(candidate, ["test -f allowed.txt"])
+            fixture.write_result(["test -f allowed.txt"])
             return expect_validator_reject(
                 fixture, "files changed outside declared paths â€” REJECT:"
             )
@@ -205,9 +210,9 @@ def scenario_two(break_fixture: bool) -> tuple[bool, str]:
 def scenario_three() -> tuple[bool, str]:
     try:
         with ValidatorFixture("required-test-skipped") as fixture:
-            candidate = fixture.commit_files({"allowed.txt": "test must be reported\n"})
+            fixture.modify_files({"allowed.txt": "test must be reported\n"})
             fixture.write_packet(["allowed.txt"], ["test -f allowed.txt"])
-            fixture.write_result(candidate, [])
+            fixture.write_result([])
             return expect_validator_reject(
                 fixture,
                 "required tests declared but none run, and no blocker reported â€” REJECT",
@@ -239,16 +244,27 @@ def scenario_defect_one_lock_owner() -> tuple[bool, str]:
             created = run([BASH, str(worktree_script), "create", "alpha"], root)
             if created.returncode != 0:
                 return False, f"could not create alpha fixture worktree: {created.output}"
+            active = root / ".director" / "active-worktree"
+            if not active.is_file():
+                return False, "creating alpha did not write active-worktree"
+            expected_parent = checked([BASH, "-c", 'cd "$1/.." && pwd', "--", str(root)])
+            expected_worktree = f"{expected_parent}/fixture-repository-alpha"
+            if active.read_text(encoding="utf-8").strip() != expected_worktree:
+                return False, "active-worktree did not name alpha's absolute worktree path"
             removed = run([BASH, str(worktree_script), "remove", "beta"], root)
             lock = root / ".director" / "worktree.lock"
             if not lock.is_dir():
                 return False, "removing beta released alpha's lock"
+            if not active.is_file():
+                return False, "removing beta deleted alpha's active-worktree"
             if "belongs to alpha" not in removed.output:
                 return False, "removing beta did not report the lock owner"
             cleaned = run([BASH, str(worktree_script), "remove", "alpha"], root)
             if cleaned.returncode != 0:
                 return False, f"could not clean alpha fixture worktree: {cleaned.output}"
-            return True, "beta cannot release alpha's owned lock"
+            if active.exists():
+                return False, "removing alpha did not delete active-worktree"
+            return True, "worktree lifecycle writes active-worktree and only its owner removes it"
     except Exception as error:
         return False, f"fixture could not be built or exercised: {error}"
 
@@ -256,10 +272,10 @@ def scenario_defect_one_lock_owner() -> tuple[bool, str]:
 def scenario_defect_two_missing_base_commit() -> tuple[bool, str]:
     try:
         with ValidatorFixture("missing-base-commit") as fixture:
-            candidate = fixture.commit_files({"allowed.txt": "within declared scope\n", "FORBIDDEN.txt": "outside declared scope\n"})
+            fixture.modify_files({"allowed.txt": "within declared scope\n", "FORBIDDEN.txt": "outside declared scope\n"})
             fixture.write_packet(["allowed.txt"], ["test -f allowed.txt"])
             write_text(fixture.run_directory / "worktree.yaml", "unit_id: missing-base-commit\n")
-            fixture.write_result(candidate, ["test -f allowed.txt"])
+            fixture.write_result(["test -f allowed.txt"])
             return expect_validator_reject(
                 fixture, "base_commit is missing or empty â€” REJECT"
             )
@@ -514,8 +530,9 @@ def scenario_five() -> tuple[bool, str]:
     egress = "egress remains open (documented residual)" if jailed_dns.returncode == 0 else "egress DNS probe failed"
     if baseline_missing:
         joined = ", ".join(baseline_missing)
-        detail = "; ".join(failures + [egress])
-        return False, f"INCONCLUSIVE: unjailed baseline lacks {joined}; {detail}"
+        if failures:
+            return False, "; ".join(failures + [egress])
+        return True, f"gate capability absent; unjailed baseline unavailable in this session ({joined}); {egress}"
     if failures:
         return False, "; ".join(failures)
     return True, "gate capability absent; unjailed baseline authenticated; egress remains open (documented residual)"

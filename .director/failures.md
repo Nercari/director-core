@@ -99,3 +99,15 @@ in practice.
 Corrected by describing what is true — agy blocked with the unblock order
 recorded, codex marked de facto primary — rather than by adjusting practice to
 match an aspiration.
+
+## Executor commit contract impossible under workspace-write, found 2026-07-27
+
+The configured invocation failed before Git could commit with `fatal: Unable to
+create '.../.git/worktrees/<wt>/index.lock': Permission denied`. Supplying an
+author and committer identity did not change that result. Two independent units
+completed their required tests but could not sign; eleven earlier units hid the
+defect because the orchestrator committed by hand and instructed the executor
+not to. The route worked, but the contract had never been exercised. The
+contract now requires modified files, evidence, and a result; the orchestrator
+reviews, stages, and commits. Making `.git` writable was rejected because it
+would also grant the executor write access to the Git index and refs.

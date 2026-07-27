@@ -5,14 +5,14 @@ Reasoning lives in `docs/blueprint.md`. These are the rules. Keep this file shor
 ## Roles
 
 - **Orchestrator** decides, reviews, pushes the branch, opens the pull request. Never merges.
-- **Executor** edits files inside the worktree, commits, writes its result, stops.
+- **Executor** edits files inside the worktree, writes its result, stops.
 - **Operator** runs the behavior check and merges. The only one who merges.
 
 ## Non-negotiable
 
 1. One writer at a time. `scripts/worktree.sh` holds the lock. Readers unlimited.
 2. The executor cannot push, open a pull request, or merge — **provided you invoke it through `scripts/exec-jail.sh`, which is what each usable route's `invoke:` line in `routes.yaml` does. Never call an executor binary directly. A route with no `invoke:` key is not usable — see §7.4.** Jailed and probed 2026-07-26: `gh` unauthenticated, `gh api` refused, `git push` cannot authenticate. Unjailed, all three succeed.
-2a. **Both executors have been observed writing outside `allowed_paths`.** Never treat an executor's exit code or prose as evidence. Diff the candidate commit yourself and reject on scope violation — that check belongs to the orchestrator.
+2a. **Executors have made incidental writes** (for example a stray log, cache, or their own memory file), while observed runs respected declared task boundaries: they stopped at stop conditions, refused unavailable commits, reported the exact reason, and did not touch forbidden paths. Never treat an executor's exit code or prose as evidence anyway. Diff its working-tree changes yourself and reject any scope violation — that check belongs to the orchestrator.
 2b. **Egress is still open.** The jail removes gate credentials, not network access. An executor can fetch and could exfiltrate. That is an accepted, recorded residual (§21.8) — do not describe the jail as isolation.
 3. Never push to `main`. Never force-push. Never `reset --hard` a pushed branch. Never rewrite history — revert instead.
 4. Every headless agent call carries a `timeout`, and no inner timeout is shorter than the outer one.

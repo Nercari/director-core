@@ -8,7 +8,48 @@
 set -uo pipefail
 
 HOOKS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HOOKS/../.." && pwd)"
 FAILURES=0
+CONTROL_DIR="$(mktemp -d)"
+ACTIVE_FILE="$ROOT/.director/active-worktree"
+HANDOFF_FILE="$ROOT/.director/current-handoff.json"
+ACTIVE_BACKUP=""
+HANDOFF_BACKUP=""
+
+# shellcheck disable=SC2329,SC2317  # invoked indirectly by the EXIT trap below,
+# which older shellcheck reports as unreachable (SC2317) and newer as uncalled
+# (SC2329). Both are the same blind spot: neither version follows a trap.
+# Both codes are listed because CI's shellcheck and a current local build
+# disagree about which one to emit.
+# The trap is deliberate: this restores .director/active-worktree even when an
+# assertion fails, because leaving that file behind changes hook behaviour for
+# every later session, and deleting it while a unit is live silently disables
+# both hooks it gates.
+restore_control_files() {
+  if [ -n "$ACTIVE_BACKUP" ]; then
+    cp "$ACTIVE_BACKUP" "$ACTIVE_FILE"
+  else
+    rm -f "$ACTIVE_FILE"
+  fi
+  if [ -n "$HANDOFF_BACKUP" ]; then
+    cp "$HANDOFF_BACKUP" "$HANDOFF_FILE"
+  else
+    rm -f "$HANDOFF_FILE"
+  fi
+  rm -rf "$CONTROL_DIR"
+}
+# Case (a): this selftest writes the repository's active-worktree and handoff
+# controls, so EXIT always restores their prior state, including on failure.
+trap restore_control_files EXIT
+
+if [ -f "$ACTIVE_FILE" ]; then
+  ACTIVE_BACKUP="$CONTROL_DIR/active-worktree"
+  cp "$ACTIVE_FILE" "$ACTIVE_BACKUP"
+fi
+if [ -f "$HANDOFF_FILE" ]; then
+  HANDOFF_BACKUP="$CONTROL_DIR/current-handoff.json"
+  cp "$HANDOFF_FILE" "$HANDOFF_BACKUP"
+fi
 
 # expect_block <label> <hook> <json>
 expect_block() {
@@ -34,6 +75,45 @@ expect_allow() {
     printf '  [FAIL]  wrongly blocked (exit %s): %s\n' "$code" "$label"
     FAILURES=$((FAILURES + 1))
   fi
+}
+
+# assert_worktree_active_file proves the lifecycle command creates and removes
+# the hook control in an isolated Git fixture. The fixture keeps this selftest
+# from creating a real unit or changing this repository's history.
+assert_worktree_active_file() {
+  local temporary fixture script active expected code
+  temporary="$(mktemp -d)"
+  fixture="$temporary/fixture-repository"
+  script="$fixture/scripts/worktree.sh"
+  mkdir -p "$fixture/scripts" "$fixture/.director"
+  cp "$ROOT/scripts/worktree.sh" "$script"
+  git init --initial-branch=main "$fixture" >/dev/null 2>&1 || { rm -rf "$temporary"; return 1; }
+  git -C "$fixture" config user.name "Hook selftest" || { rm -rf "$temporary"; return 1; }
+  git -C "$fixture" config user.email "hook-selftest@director.local" || { rm -rf "$temporary"; return 1; }
+  printf 'fixture\n' > "$fixture/README.md"
+  if ! git -C "$fixture" add README.md || ! git -C "$fixture" commit -m fixture >/dev/null 2>&1; then
+    rm -rf "$temporary"
+    return 1
+  fi
+  local create_output remove_output
+  create_output="$(bash "$script" create selftest-active 2>&1)"
+  code=$?
+  active="$fixture/.director/active-worktree"
+  expected="$temporary/fixture-repository-selftest-active"
+  if [ "$code" -ne 0 ] || [ ! -f "$active" ] || [ "$(tr -d '\r\n' < "$active")" != "$expected" ]; then
+    printf '%s\n' "$create_output" >&2
+    rm -rf "$temporary"
+    return 1
+  fi
+  remove_output="$(bash "$script" remove selftest-active 2>&1)"
+  code=$?
+  if [ "$code" -ne 0 ] || [ -e "$active" ]; then
+    printf '%s\n' "$remove_output" >&2
+    rm -rf "$temporary"
+    return 1
+  fi
+  rm -rf "$temporary"
+  return 0
 }
 
 bash_cmd() { printf '{"tool_input":{"command":%s}}' "$(printf '%s' "$1" | jq -Rs .)"; }
@@ -72,6 +152,23 @@ echo "block-out-of-scope-write — vault"
 expect_block "vault 04_Memory"        block-out-of-scope-write.sh "$(file_path 'C:\Users\dorot\Documents\Obsidian Vaults\Antigravity\04_Memory\x.md')"
 expect_block "vault global/"          block-out-of-scope-write.sh "$(file_path 'C:\Users\dorot\Documents\Obsidian Vaults\Antigravity\global\wiki\overview.md')"
 expect_allow "vault 01_Inbox"         block-out-of-scope-write.sh "$(file_path 'C:\Users\dorot\Documents\Obsidian Vaults\Antigravity\01_Inbox\handoff.md')"
+
+echo
+echo "active-worktree lifecycle and hooks"
+ACTIVE_ROOT="$ROOT/.selftest-active-worktree"
+printf '%s\n' "$ACTIVE_ROOT" > "$ACTIVE_FILE"
+expect_block "outside active worktree" block-out-of-scope-write.sh "$(file_path "$ROOT/outside-active-worktree.txt")"
+expect_allow "inside active worktree"  block-out-of-scope-write.sh "$(file_path "$ACTIVE_ROOT/inside.txt")"
+rm -f "$HANDOFF_FILE"
+expect_block "missing handoff in active cycle" require-handoff.sh '{}'
+printf '%s\n' '{"published_at":"2026-07-27T00:00:00Z","run_id":"selftest","capacity_state":"A","objective":"exercise the hook","repository_state":{"main_commit":"0123456","open_branches":[],"open_pull_requests":[]},"decisions_taken":[],"next_action":"stop"}' > "$HANDOFF_FILE"
+expect_allow "valid handoff in active cycle" require-handoff.sh '{}'
+if assert_worktree_active_file; then
+  printf '  [ OK ]  worktree create writes active-worktree and owned remove deletes it\n'
+else
+  printf '  [FAIL]  worktree lifecycle did not maintain active-worktree\n'
+  FAILURES=$((FAILURES + 1))
+fi
 
 echo
 echo "KNOWN BYPASS — asserted, not hidden (§15.1 declared weakness)"

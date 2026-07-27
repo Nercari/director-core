@@ -59,12 +59,13 @@
     "output_contract": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["candidate_commit", "evidence_bundle"],
+      "required": ["modified_files", "evidence_bundle", "result_json"],
       "properties": {
-        "candidate_commit": { "const": "required" },
-        "evidence_bundle": { "const": "required" }
+        "modified_files": { "const": "required" },
+        "evidence_bundle": { "const": "required" },
+        "result_json": { "const": "required" }
       },
-      "description": "Deliberately excludes branch_pushed and pull_request. The executor has no network; the orchestrator owns the gate. Blueprint section 8.3."
+      "description": "The executor edits and stops. The orchestrator reviews the diff, then stages and commits. Blueprint section 8.3."
     }
   }
 }
