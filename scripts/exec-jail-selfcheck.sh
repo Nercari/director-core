@@ -17,6 +17,17 @@ note() { printf '  [NOTE]  %s\n' "$1"; }
 echo "exec-jail selfcheck"
 echo
 
+# --- SSH agent credentials must not cross the jail boundary -----------------
+# Set sentinels explicitly so this assertion stays meaningful on hosts that do
+# not normally run an SSH agent.
+ssh_env="$(SSH_AUTH_SOCK=/tmp/director-selfcheck-agent SSH_AGENT_PID=4242 \
+  bash "$JAIL" env)"
+if echo "$ssh_env" | grep -qE '^(SSH_AUTH_SOCK|SSH_AGENT_PID)='; then
+  bad "jailed process inherited SSH agent variables"
+else
+  ok "jailed process has no SSH agent variables"
+fi
+
 # --- gh must be unauthenticated inside the jail ------------------------------
 if command -v gh >/dev/null 2>&1; then
   out="$(bash "$JAIL" gh auth status 2>&1 | head -2)"

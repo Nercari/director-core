@@ -46,14 +46,21 @@ trap 'rm -rf "$JAIL"' EXIT
 # GIT_TERMINAL_PROMPT=0 and GCM_INTERACTIVE=never turn a credential prompt into
 # an immediate failure rather than a hang. Without them a jailed push blocks
 # waiting for a username that will never be typed.
+#
+# SSH agent variables are removed and Git is forced to a refusing SSH command.
+# This is defensive: no SSH agent or keys were present in the reproduced hole,
+# but a future agent must not turn an SSH remote into a bypass.
 exec env \
   -u GH_TOKEN \
   -u GITHUB_TOKEN \
   -u GH_ENTERPRISE_TOKEN \
   -u GITHUB_ENTERPRISE_TOKEN \
+  -u SSH_AUTH_SOCK \
+  -u SSH_AGENT_PID \
   GH_CONFIG_DIR="$JAIL/ghconfig" \
   GIT_CONFIG_GLOBAL="$JAIL/gitconfig-null" \
   GIT_CONFIG_SYSTEM="$JAIL/gitconfig-null" \
   GIT_TERMINAL_PROMPT=0 \
   GCM_INTERACTIVE=never \
+  GIT_SSH_COMMAND=/bin/false \
   "$@"

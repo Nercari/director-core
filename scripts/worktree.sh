@@ -34,10 +34,18 @@ create)
     echo "if no unit is running, a worktree was orphaned — remove the lock by hand." >&2
     exit 1
   }
+  # The directory is the atomic lock; its owner file binds that lock to this
+  # unit so another unit's cleanup cannot release a live writer.
+  printf '%s\n' "$UNIT" > "$LOCK/unit_id" || {
+    rmdir "$LOCK"
+    echo "could not record worktree lock owner" >&2
+    exit 1
+  }
 
   base="$(git -C "$ROOT" rev-parse main)"
 
   if ! git -C "$ROOT" worktree add -b "$BRANCH" "$WT" main; then
+    rm -f "$LOCK/unit_id"
     rmdir "$LOCK"
     echo "worktree creation failed" >&2
     exit 1
@@ -72,7 +80,15 @@ remove)
     echo "no worktree at $WT (nothing to remove)"
   fi
   git -C "$ROOT" worktree prune
-  [ -d "$LOCK" ] && rmdir "$LOCK" && echo "lock released"
+  if [ -d "$LOCK" ]; then
+    lock_owner="$(cat "$LOCK/unit_id" 2>/dev/null || true)"
+    if [ "$lock_owner" = "$UNIT" ]; then
+      rm -f "$LOCK/unit_id"
+      rmdir "$LOCK" && echo "lock released"
+    else
+      echo "worktree lock belongs to ${lock_owner:-an unknown unit}; not released for $UNIT" >&2
+    fi
+  fi
   ;;
 
 *) usage ;;
