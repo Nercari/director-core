@@ -16,7 +16,11 @@ HANDOFF_FILE="$ROOT/.director/current-handoff.json"
 ACTIVE_BACKUP=""
 HANDOFF_BACKUP=""
 
-# shellcheck disable=SC2329  # invoked indirectly by the EXIT trap below.
+# shellcheck disable=SC2329,SC2317  # invoked indirectly by the EXIT trap below,
+# which older shellcheck reports as unreachable (SC2317) and newer as uncalled
+# (SC2329). Both are the same blind spot: neither version follows a trap.
+# Both codes are listed because CI's shellcheck and a current local build
+# disagree about which one to emit.
 # The trap is deliberate: this restores .director/active-worktree even when an
 # assertion fails, because leaving that file behind changes hook behaviour for
 # every later session, and deleting it while a unit is live silently disables
