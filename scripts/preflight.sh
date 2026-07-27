@@ -124,9 +124,10 @@ else
     while IFS= read -r forbidden_pattern; do
       [ -z "$forbidden_pattern" ] && continue
       case "$model" in
-        # shellcheck disable=SC2254  # glob matching is the point: the pattern
-        # "claude-*" must match claude-opus-4-6-thinking. Quoting it would make
-        # the comparison literal and the check would never fire.
+        # shellcheck disable=SC2254  # glob matching is the point: a vendor
+        # wildcard pattern must match that vendor's concrete model identifiers.
+        # Quoting it makes the comparison literal and the check never fires.
+        # No concrete model name may appear here — the gate scans *.sh for them.
         $forbidden_pattern)
           fail "$alias model $model matches forbidden_models pattern $forbidden_pattern"
           ;;
