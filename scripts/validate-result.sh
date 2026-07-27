@@ -41,7 +41,6 @@ else
 fi
 
 status="$(jq -r '.status' "$RESULT")"
-commit="$(jq -r '.candidate_commit // "null"' "$RESULT")"
 route="$(jq -r '.route_used' "$RESULT")"
 
 # check-jsonschema is optional on this host. These gate-critical schema
@@ -63,23 +62,19 @@ if [ -z "$route" ] || [ "$route" = "null" ]; then
   fail "route_used is missing or empty — REJECT"
 fi
 
-for forbidden_key in pull_request_url branch_pushed; do
+for forbidden_key in candidate_commit pull_request_url branch_pushed; do
   if jq -e "has(\"$forbidden_key\")" "$RESULT" >/dev/null 2>&1; then
     fail "result contains forbidden key $forbidden_key — REJECT"
   fi
 done
 
-# A "completed" with no commit is the first conformance scenario. Reject.
+# The executor reports a completed working-tree diff. The orchestrator reviews,
+# stages, and commits only after this validation; a candidate commit is neither
+# expected nor possible under the configured workspace-write sandbox.
 if [ "$status" = "completed" ]; then
-  if [ "$commit" = "null" ] || [ -z "$commit" ]; then
-    fail "status=completed but no candidate_commit — REJECT"
-  elif git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null; then
-    pass "candidate_commit $commit exists"
-  else
-    fail "candidate_commit $commit does not exist in the worktree — REJECT"
-  fi
+  pass "status=completed (working-tree diff awaits orchestrator review)"
 elif [ "$status" = "blocked" ] || [ "$status" = "failed" ]; then
-  pass "status=$status (no commit required)"
+  pass "status=$status"
 fi
 
 # main must be untouched. The executor works on a branch, in a worktree, only.
@@ -108,14 +103,17 @@ fi
 # containing a deliberate FORBIDDEN.txt. Both executors have been observed
 # writing outside their declared scope, so an absent declaration is the one case
 # where waving the change through is least acceptable.
-if [ "$commit" != "null" ]; then
-  if [ ! -f "$PACKET" ]; then
-    fail "no packet at $PACKET — scope cannot be checked, so nothing is in scope — REJECT"
-  fi
+if [ ! -f "$PACKET" ]; then
+  fail "no packet at $PACKET — scope cannot be checked, so nothing is in scope — REJECT"
 fi
 
-if [ -f "$PACKET" ] && [ "$commit" != "null" ] && [ "$base_valid" -eq 1 ]; then
-  changed="$(git -C "$WT" diff --name-only "$main_before" "$commit" 2>/dev/null)"
+if [ -f "$PACKET" ] && [ "$base_valid" -eq 1 ]; then
+  changed="$(
+    {
+      git -C "$WT" diff --name-only --no-renames "$main_before"
+      git -C "$WT" ls-files --others --exclude-standard
+    } | sort -u
+  )"
   allowed="$(sed -n '/^allowed_paths:/,/^[a-z_]*:/p' "$PACKET" | sed -n 's/^ *- *//p')"
   if [ -z "$allowed" ]; then
     fail "packet declares no allowed_paths — REJECT. An undeclared scope is not an unlimited scope."

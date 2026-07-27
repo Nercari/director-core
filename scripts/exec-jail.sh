@@ -43,6 +43,11 @@ trap 'rm -rf "$JAIL"' EXIT
 # A repo-level helper in .git/config would survive this — check for one before
 # trusting the jail on a repository you did not create.
 #
+# Nulling the global config also removes a global-only Git identity. Set a
+# distinct executor identity explicitly. This does NOT enable executor commits:
+# the workspace-write sandbox still denies .git/worktrees/<wt>/index.lock. It
+# is defensive for a future mode in which .git is deliberately writable.
+#
 # GIT_TERMINAL_PROMPT=0 and GCM_INTERACTIVE=never turn a credential prompt into
 # an immediate failure rather than a hang. Without them a jailed push blocks
 # waiting for a username that will never be typed.
@@ -60,6 +65,10 @@ exec env \
   GH_CONFIG_DIR="$JAIL/ghconfig" \
   GIT_CONFIG_GLOBAL="$JAIL/gitconfig-null" \
   GIT_CONFIG_SYSTEM="$JAIL/gitconfig-null" \
+  GIT_AUTHOR_NAME=director-executor \
+  GIT_AUTHOR_EMAIL=executor@director.local \
+  GIT_COMMITTER_NAME=director-executor \
+  GIT_COMMITTER_EMAIL=executor@director.local \
   GIT_TERMINAL_PROMPT=0 \
   GCM_INTERACTIVE=never \
   GIT_SSH_COMMAND=/bin/false \

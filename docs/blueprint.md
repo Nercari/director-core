@@ -23,7 +23,7 @@ The pipeline this document describes has never been run. Its **environment claim
 
 ## 1. Decision in one paragraph
 
-Claude Code orchestrates and reviews. A delegated executor implements, **inside a worktree, with no network**. The Director is a single `AGENTS.md` read natively by Codex and Antigravity and bridged into Claude Code by a one-line `CLAUDE.md`. Every unit of work runs in its own git worktree on its own branch; the **orchestrator** — never the executor — pushes the branch and opens the pull request. Changes that introduce **no new observable behavior** merge automatically when deterministic checks pass. Changes that introduce **new behavior** require you to run one command, watch it work, and click merge. A local git-backed Obsidian vault holds procedural memory; a separate public repository holds the reusable core. Nothing in the architecture names a model; models are chosen per project, at setup, and recorded in one registry file with expiry dates.
+Claude Code orchestrates and reviews. A delegated executor implements **inside a worktree**; the jail removes gate credentials while egress remains an explicit residual. The Director is a single `AGENTS.md` read natively by Codex and Antigravity and bridged into Claude Code by a one-line `CLAUDE.md`. Every unit of work runs in its own git worktree on its own branch; the **orchestrator** — never the executor — reviews, stages, commits, pushes the branch, and opens the pull request. Changes that introduce **no new observable behavior** merge automatically when deterministic checks pass. Changes that introduce **new behavior** require you to run one command, watch it work, and click merge. A local git-backed Obsidian vault holds procedural memory; a separate public repository holds the reusable core. Nothing in the architecture names a model; models are chosen per project, at setup, and recorded in one registry file with expiry dates.
 
 ---
 
@@ -53,7 +53,7 @@ Three verification layers, valuable because they **fail differently from one ano
 |---|---|---|
 | 1 | **The vault's real path, structure, and rulebook** (§11) | 10.1 pointed at `~/Documents/obsidian vault`, which does not exist, and invented a four-folder tree matching neither the real vault nor `AI-SHARED.md`, which declares itself canonical |
 | 2 | **The reusable core moved out of the vault** into its own repository (§6.1, §11) | 10.1's §15.1 hook made the vault read-only outside one inbox path, while §11.3 required core artefacts to be improved in the vault. The orchestrator could never have improved its own core |
-| 3 | **The executor gets no network** (§8.3, §9, §15.1) | Hooks are Claude Code `PreToolUse` hooks. They fire on the orchestrator's tool calls and are invisible to a subprocess. 10.1's `output_contract` required the executor to push and open a PR — handing the gate's bypass to the least supervised process |
+| 3 | **The executor loses gate credentials** (§8.3, §9, §15.1) | Hooks are Claude Code `PreToolUse` hooks. They fire on the orchestrator's tool calls and are invisible to a subprocess. 10.1's `output_contract` required the executor to push and open a PR — handing the gate's bypass to the least supervised process; egress remains recorded residual risk |
 | 4 | **agy restored as a route** (§7.1, Appendix A) | 10.1 listed it Known-broken. Tested: `agy -p` exits 0 and prints correctly under non-TTY. The deletion rested on a false claim, and it contradicted a standing operator rule mandating delegation to that route |
 | 5 | **Degradation ladder reordered** (§7.5) | 10.1 warned that one state lost Layer 2 and waved through a worse state that lost it to *self*-review. Escalating to a third vendor is now tried before going DIRECT |
 | 6 | **`gh pr merge` hook narrowed** (§15.1) | 10.1's hook blocked `gh pr merge` outright. Auto-merge is armed with `gh pr merge --auto`. §15.1 blocked §9.4 |
@@ -108,12 +108,12 @@ ORCHESTRATOR ── ORCH_PRIMARY (Claude Code — the only route with hooks)
 ▼
 ENFORCEMENT ── GitHub rulesets · CI gate · hooks · 3 scripts · git
 ▼
-EXECUTOR ───── EXEC_PRIMARY        ── sandboxed, NO NETWORK
+EXECUTOR ───── EXEC_PRIMARY        ── tool-specific sandbox; see §8.3
      ├─ EXEC_STRONG   (escalation, named capability delta only)
      └─ EXEC_LOCAL    (conditional — §17.1)
-│ produces: a candidate commit inside the worktree. Nothing else.
+│ produces: modified files inside the worktree. Nothing else.
 ▼
-EVIDENCE ───── worktree · branch · candidate commit · raw test output
+EVIDENCE ───── worktree · branch · reviewed diff · raw test output
 ▼
 GATE ───────── pull request → checks → (auto-merge | operator merge) → main
 
@@ -254,7 +254,7 @@ agy -p --sandbox --mode accept-edits --print-timeout 5m "<task>"
 
 No output. No work. **The route could never have executed anything.** An orchestrator delegating to it would receive exit 0 and an empty result, which is the worst possible failure shape: silence that looks like success.
 
-Making it functional needs `--dangerously-skip-permissions`, which auto-approves every tool. With egress still open (§21.9) and this route already observed writing outside its declared scope, that is strictly worse than `EXEC_STRONG`, which executes headlessly under `--sandbox` with no bypass flag at all.
+Making it functional needs `--dangerously-skip-permissions`, which auto-approves every tool. With egress still open (§21.9) and this route already observed writing outside its declared scope, that is strictly worse than `EXEC_STRONG`, whose workspace-write mode blocks `.git` writes but is not claimed to isolate egress or credentials.
 
 **So the registry now says what is true:** `EXEC_PRIMARY` is quarantined with `blocked_on` recorded and **no runnable `invoke:` key at all** — the probed command is kept only under `invoke_NON_FUNCTIONAL_do_not_use`, because a broken command string sitting in a field named `invoke` is an invitation. `EXEC_STRONG` is marked de facto primary.
 
@@ -329,8 +329,9 @@ behavior_check: command    # the one YOU run and watch (§9.5) — must run on W
 constraints: [ authoritative constraint ]
 stop_conditions: [ condition requiring return to orchestrator ]
 output_contract:
-  candidate_commit: required
+  modified_files: required     # the executor edits and stops
   evidence_bundle: required
+  result_json: required
 ```
 
 Target 1,500–4,000 tokens. **A unit whose objective and acceptance criteria cannot be written in that budget without hand-waving is too big.** Keep diffs small for a second reason: review effectiveness, human and machine, falls off sharply past roughly 200–400 changed lines.
@@ -339,14 +340,13 @@ Target 1,500–4,000 tokens. **A unit whose objective and acceptance criteria ca
 
 **No foundation unit.** Every unit must stand green and revertible on its own. The test is not "is it useful alone" but **"is it verifiable alone."**
 
-**`output_contract` no longer includes `branch_pushed` or `pull_request`.** See §8.3.
+**The orchestrator stages and commits only after reviewing the diff.** `output_contract` deliberately excludes a candidate commit, `branch_pushed`, and `pull_request`. See §8.3.
 
 ### 8.3 Result, and the executor's boundary
 
 ```json
 {
   "status": "completed | blocked | failed",
-  "candidate_commit": "sha-or-null",
   "branch": "task/<unit-id>",
   "route_used": "EXEC_PRIMARY | EXEC_STRONG | EXEC_LOCAL | DIRECT",
   "summary": "short factual summary",
@@ -356,13 +356,38 @@ Target 1,500–4,000 tokens. **A unit whose objective and acceptance criteria ca
 }
 ```
 
-> **CORRECTION, 2026-07-26 — read before relying on anything in this section.**
+> **CORRECTION, 2026-07-27 — the original output contract was unsatisfiable.**
+> Under the configured `codex exec --sandbox workspace-write` invocation, Git
+> fails before a commit: `fatal: Unable to create
+> '.../.git/worktrees/<wt>/index.lock': Permission denied`. Supplying author
+> and committer identity does not change that binding constraint. Two independent
+> units completed their required tests and returned `blocked` with no candidate
+> commit because they could not sign. Eleven earlier units appeared to work only
+> because the orchestrator committed by hand and told the executor not to.
+> Registry and practice diverged from the day the contract was written — the
+> same shape as §7.4's unexercised invocation defect, but here the route works
+> and the contract was wrong.
+>
+> Making `.git` writable would restore executor commits, but also gives the
+> executor write access to Git's index and refs, including commit and history
+> rewrite operations. That option is rejected: the safer boundary is reviewed
+> working-tree changes followed by an orchestrator-owned stage and commit.
+>
+> **Sandbox is not one property across tools.** agy's `--sandbox restricted`
+> was observed to restrict neither network, credentials, nor paths. Codex's
+> `--sandbox workspace-write` blocks `.git` writes, but does not block network
+> egress or inherited credentials. Do not transfer a property observed for one
+> tool to the other.
+>
+> **Earlier correction, 2026-07-26 — read before relying on anything below.**
 > This section described the executor as having no network. **It does.** Probed
 > directly under `codex exec --sandbox workspace-write`: `nslookup github.com`
 > exit 0, `gh auth status` exit 0, **`gh api user` exit 0 returning live
 > authenticated JSON** with `repo` and `workflow` scope. An independent probe
 > found the same for agy, which additionally wrote outside its `allowed_paths`.
-> `--sandbox` restricted neither network, nor credentials, nor paths.
+> agy's sandbox restricted neither network, credentials, nor paths. Codex's
+> workspace-write sandbox did restrict `.git` writes, but not network or
+> credentials.
 >
 > Seven units were executed on this design on 2026-07-25. Nothing mechanical
 > prevented the executor pushing a branch, opening a pull request, or merging
@@ -382,7 +407,7 @@ Target 1,500–4,000 tokens. **A unit whose objective and acceptance criteria ca
 > This is the sharpest available example of the document's own thesis: a
 > guarantee nobody probed is a guarantee nobody has.
 
-**The executor is intended to have no network, and this is load-bearing.**
+**The executor's gate credentials are removed by the jail; egress remains open.**
 
 10.1 required the executor to push its branch and open the pull request. That design hands the gate's bypass to the least supervised process in the system, for a structural reason 10.1 did not notice: **every hook in §15.1 is a Claude Code `PreToolUse` hook.** It fires on the orchestrator's tool calls. An executor launched as a subprocess runs its own shell; the hook sees `agy -p "<packet>"` and nothing after. Of the ten invariants, only "no push to `main`" had a second line of defence (the GitHub ruleset). The rest — no force-push, no hard reset, **no merging**, no reading secrets, no metered credentials — were unenforced against the one process actually writing code.
 
@@ -390,14 +415,14 @@ And the executor inherits the operator's credentials. `gh` is authenticated via 
 
 **So the capability is removed rather than guarded** (§4.1 principle 10):
 
-- The executor runs sandboxed, with no reachable `gh` credential and no network.
-- It edits files inside the worktree, commits, writes its result JSON, and stops.
-- The **orchestrator** pushes the branch and opens the pull request, where all ten hooks apply.
+- The executor runs through the jail, with no reachable `gh` credential; egress remains an accepted residual.
+- It edits files inside the worktree, writes evidence and its result JSON, and stops.
+- The **orchestrator** reviews the uncommitted diff, stages and commits it, then pushes the branch and opens the pull request, where all ten hooks apply.
 - Only the operator ever merges.
 
 This is a smaller design than 10.1's, not a larger one: the orchestrator already holds the worktree, the diff, and the review. It also removes §9.4 condition 2's ambiguity about authorship, since nothing but the orchestrator ever opens a pull request.
 
-`validate-result` rejects claimed success when: no candidate commit exists · `main` changed · files outside the unit's permitted paths changed · required tests were skipped without a reported blocker · a metered credential was used · an unauthorised route or a `forbidden_models` entry was used · the executor reached the network.
+`validate-result` rejects claimed success when: `main` changed · the working-tree diff contains files outside the unit's permitted paths · required tests were skipped without a reported blocker · a metered credential was used · an unauthorised route or a `forbidden_models` entry was used · the executor reports reaching the gate.
 
 ---
 
@@ -559,7 +584,7 @@ Unpushed commit → `git reset --soft HEAD~1` · pushed commit → `git revert <
 
 ## 10. Adversarial review — Layer 2
 
-After the executor commits and before you are asked to merge, the orchestrator reviews the diff.
+After the executor stops and before the orchestrator stages and commits, the orchestrator reviews the diff.
 
 **Why cross-vendor matters.** Different vendor, different training, different harness — measurably less correlated than a model grading its own work, where self-preference bias is documented and scales with the model's ability to recognize its own output. Costs nothing extra: the orchestrator already holds the diff.
 
@@ -795,7 +820,7 @@ Expect a block and `exit=2`. Repeat with `git push -u origin task/demo` — expe
 
 - **`preflight`** — no-overage controls, route authorisation, registry validity and freshness. Green/red checklist. **Refuses to launch on an unresolved or stale registry.**
 - **`worktree`** — creates and destroys the worktree and branch, records the base commit, holds an exclusive lock so a second concurrent creation fails loudly rather than racing.
-- **`validate-result`** — checks the result JSON against the schema, compares changed files with the unit's permitted paths, confirms a candidate commit, re-runs required tests independently, preserves raw output.
+- **`validate-result`** — checks the result JSON against the schema, compares the uncommitted working-tree files with the unit's permitted paths, re-runs required tests independently, preserves raw output.
 
 **`flock` does not exist on this machine.** Use a lock *directory* instead — `mkdir` is atomic on every filesystem and fails if the directory exists:
 
@@ -935,15 +960,15 @@ Set every control in §14. Create `director-core` as a **public** repository. Wr
 *Verify:* ask the orchestrator to edit a file outside the worktree — blocked. To write to the vault outside `01_Inbox/` — blocked. To run `gh pr merge` — blocked. To run `gh pr merge --auto` — **allowed**. To end a cycle without a handoff — blocked. Then run the §15.1 bypass demonstration and watch a hook fail to block, so you know exactly what it is worth. Then the ten-minute swap drill.
 
 **Phase 2 — delegation round trip.**
-Wire agy with `--sandbox --mode accept-edits --print-timeout`, JSON output, a schema, and an outer `timeout`. Confirm it has no reachable network or `gh` credential.
-*Verify:* run one real bounded task end to end as a **behavior change**. Confirm by hand: the worktree existed; the **orchestrator** pushed the branch and opened the PR; **the executor's network and gate access are ABSENT rather than merely unused** — probe it, do not infer it (§8.3 correction, §21.8); the evidence directory holds real test output rather than prose; `validate-result` rejects a deliberately corrupted result file. Run the behavior check yourself, read the adversarial review, merge.
+Wire agy with its restricted mode, JSON output, a schema, and an outer `timeout`. Confirm the jail removes reachable `gh` credentials; do not infer that its sandbox controls egress, credentials, or paths.
+*Verify:* run one real bounded task end to end as a **behavior change**. Confirm by hand: the worktree existed; the **orchestrator** reviewed, staged, committed, pushed the branch, and opened the PR; **the executor's gate access is absent rather than merely unused** — probe it, do not infer it (§8.3 correction, §21.8); egress remains recorded and tested as open; the evidence directory holds real test output rather than prose; `validate-result` rejects a deliberately corrupted result file. Run the behavior check yourself, read the adversarial review, merge.
 
 **Phase 3 — auto-merge, in `Finance dashboard`.**
 **Not in `director-core`.** §9.4 condition 4 makes almost every file there non-green-path, so the only units available would be documentation edits — a thin test of a real gate. Apply Phase −1 to `Finance dashboard` (private), then run at least three green-path units through.
 *Verify:* open a PR violating each CI check in turn and watch the gate go red. Confirm auto-merge does **not** fire on a PR touching `.github/**`. Spot-check every auto-merged change this month, asking only §12's one question.
 
 **Phase 4 — fallback and conformance, in `director-core`.**
-Build the five conformance scenarios: executor reports success with no candidate commit → REJECT · file changed outside permitted paths → REJECT · required test skipped with no blocker → REJECT · second failure with the attribution test blaming the criteria → REJECT and re-slice · **an executor with no network cannot reach `gh` at all — verify the capability is absent rather than the instruction obeyed. **As of 2026-07-26 this scenario PASSES for the gate when the executor is invoked through `scripts/exec-jail.sh` (§21.8): `gh api user` is refused and push cannot authenticate, probed live. It still FAILS for egress — DNS resolves — which needs §21.9's account isolation.****
+Build the five conformance scenarios: executor reports success with an uncommitted reviewed diff → ACCEPT · file changed outside permitted paths → REJECT · required test skipped with no blocker → REJECT · second failure with the attribution test blaming the criteria → REJECT and re-slice · **the executor jail cannot reach `gh` credentials — verify the capability is absent rather than the instruction obeyed.** As of 2026-07-26 this scenario PASSES for the gate when the executor is invoked through `scripts/exec-jail.sh` (§21.8): `gh api user` is refused and push cannot authenticate, probed live. It still FAILS for egress — DNS resolves — which needs §21.9's account isolation.
 *Verify:* mid-task, publish a handoff and open the fallback orchestrator cold. It must reconstruct objective, decisions, repository state, and next action without the prior conversation. If it asks something the handoff already answers, the handoff is incomplete. Then run all five scenarios on both orchestrators; decisions must match. Where they diverge, tighten `AGENTS.md` and re-run both — never add a platform-specific patch.
 **Re-run conformance when `ORCH_*` changes. Do not re-run it when `EXEC_*` changes** — executors do not decide, so swapping one cannot threaten decision consistency. This is what makes per-project executor rotation nearly free.
 
@@ -980,7 +1005,7 @@ Populate `04_Memory/` only with procedures that have already recurred three time
 
 **The orchestrator decides, reviews, pushes, and opens the pull request.** Its hook layer supplies deterministic enforcement that would otherwise be bespoke, unauditable code — and it is the only process those hooks can constrain, which is why it owns everything that touches the gate.
 
-**A delegated executor implements, inside a worktree, with no network.** Which one is a per-project decision recorded in a registry, never a fact in this document.
+**A delegated executor implements inside a worktree.** The jail removes gate credentials; egress remains open until the operator-level isolation exists. Which executor is used is a per-project decision recorded in a registry, never a fact in this document.
 
 **GitHub provides the gate.** One unit, one worktree, one branch, one pull request. Green-path changes merge on green checks. Behavior changes wait for you to watch them work.
 
@@ -1099,14 +1124,14 @@ Probed **inside a live jailed codex run**, not inferred:
 
 A candidate account measured by the autoresearch session: `curl` fails to connect in 29 ms, `git ls-remote` in 73 ms, `gh auth status` reports no authentication. One caveat — a blanket outbound block also stops agy reaching Gemini, so a real agy unit needs the rule narrowed to GitHub's published ranges.
 
-**Path enforcement stays with the orchestrator regardless.** Both executors have been observed ignoring their declared scope, so `validate-result.sh` diffs the candidate commit and rejects — and as of 2026-07-26 it fails *closed* when no scope is declared, which it previously did not.
+**Path enforcement stays with the orchestrator regardless.** `validate-result.sh` diffs the uncommitted working tree and rejects a scope violation; it fails *closed* when no scope is declared.
 
 ### 21.9 Executor isolation — the remaining operator task
 
 §21.8 closed the gate. **Egress is still open**, and closing it needs a control at the operating-system layer, because everything weaker has been tried and observed to fail:
 
-- **Prompt instruction** — tier 3. Observed insufficient: the executor wrote outside `allowed_paths` when asked not to, on both routes.
-- **`--sandbox`** — observed to restrict neither network, credentials, nor paths.
+- **Prompt instruction** — tier 3. Observed insufficient for incidental writes such as a stray log, cache, or executor memory file; the orchestrator still verifies the actual diff.
+- **Sandbox flags** — tool-specific, not a common isolation property. agy's restricted mode restricted neither network, credentials, nor paths; Codex workspace-write blocks `.git` writes but leaves egress and inherited credentials available.
 - **Per-image firewall rules** — cannot work. The executor reaches the network through *child* processes (`git.exe`, `gh.exe`, `curl.exe`), each a separate image with its own firewall identity. Blocking `agy.exe` or `codex.exe` blocks nothing, and the `gh` keyring credential survives every such rule.
 
 **The control that closes both holes at once:** run the executor as a dedicated non-admin Windows account, with a Windows Firewall outbound-block rule scoped to that account's **SID** — which covers every child process it spawns — and with no `gh` keyring entry and no credential-manager state for that account.
@@ -1115,7 +1140,7 @@ Measured by the autoresearch session on a candidate `hermes-exec` account: `curl
 
 One caveat that matters: a blanket outbound block also stops agy reaching Gemini. For a real agy unit the rule must be narrowed to GitHub's published ranges rather than everything.
 
-**Path enforcement stays with the orchestrator regardless.** Both executors have now been observed ignoring `allowed_paths`, so the orchestrator diffs the candidate commit and rejects — which is what §8.3 already argued, and is the part of that section that survives the correction intact.
+**Path enforcement stays with the orchestrator regardless.** The orchestrator diffs the working tree and rejects a scope violation — the review requirement in §8.3 survives intact.
 
 ### 21.10 The lesson this subsystem taught
 

@@ -8,6 +8,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_NAME="$(basename "$ROOT")"
 LOCK="$ROOT/.director/worktree.lock"
+ACTIVE_WORKTREE="$ROOT/.director/active-worktree"
 ACTION="${1:-}"
 UNIT="${2:-}"
 
@@ -22,7 +23,7 @@ echo "$UNIT" | grep -qE '^[a-z0-9][a-z0-9-]*$' \
   || { echo "unit-id must be kebab-case: $UNIT" >&2; exit 2; }
 
 BRANCH="task/$UNIT"
-WT="$ROOT/../$REPO_NAME-$UNIT"
+WT="$(cd "$ROOT/.." && pwd)/$REPO_NAME-$UNIT"
 
 case "$ACTION" in
 create)
@@ -54,6 +55,16 @@ create)
   # Recovery point: an empty commit you can always reset back to.
   git -C "$WT" commit --allow-empty -q -m "checkpoint before $UNIT"
 
+  # The hooks use this path to make the in-flight unit observable. It must be
+  # written by the lifecycle command, not fabricated by a test or a caller.
+  if ! printf '%s\n' "$WT" > "$ACTIVE_WORKTREE"; then
+    git -C "$ROOT" worktree remove "$WT" --force >/dev/null 2>&1 || true
+    rm -f "$LOCK/unit_id"
+    rmdir "$LOCK" 2>/dev/null || true
+    echo "could not record active worktree" >&2
+    exit 1
+  fi
+
   mkdir -p "$ROOT/.director/runs/$UNIT"
   {
     echo "unit_id: $UNIT"
@@ -84,7 +95,10 @@ remove)
     lock_owner="$(cat "$LOCK/unit_id" 2>/dev/null || true)"
     if [ "$lock_owner" = "$UNIT" ]; then
       rm -f "$LOCK/unit_id"
-      rmdir "$LOCK" && echo "lock released"
+      if rmdir "$LOCK"; then
+        rm -f "$ACTIVE_WORKTREE"
+        echo "lock released"
+      fi
     else
       echo "worktree lock belongs to ${lock_owner:-an unknown unit}; not released for $UNIT" >&2
     fi

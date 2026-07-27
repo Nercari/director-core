@@ -5,13 +5,9 @@
   "description": "What the executor reports. Blueprint section 8.3.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["status", "candidate_commit", "branch", "route_used", "summary"],
+  "required": ["status", "branch", "route_used", "summary"],
   "properties": {
     "status": { "enum": ["completed", "blocked", "failed"] },
-    "candidate_commit": {
-      "type": ["string", "null"],
-      "pattern": "^[0-9a-f]{7,40}$"
-    },
     "branch": { "type": "string", "pattern": "^task/[a-z0-9][a-z0-9-]*$" },
     "route_used": {
       "enum": ["EXEC_PRIMARY", "EXEC_STRONG", "EXEC_LOCAL", "DIRECT"]
