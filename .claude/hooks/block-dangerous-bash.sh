@@ -71,6 +71,12 @@ if printf '%s' "$cmd" | grep -qE '(^|[^a-z-])(agy|codex|claude)([[:space:]]|$)';
   *)
     printf '%s' "$cmd" | grep -q 'timeout' \
       || deny "headless agent call with no timeout (§15.1)."
+    if printf '%s' "$cmd" | grep -qE '(^|[^a-z-])(agy|codex)([[:space:]]|$)'; then
+      case "$cmd" in
+      *"exec-jail.sh"*) : ;;
+      *) deny "headless executor call missing exec-jail.sh (AGENTS.md rule 2)." ;;
+      esac
+    fi
     ;;
   esac
 fi
