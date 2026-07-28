@@ -8,6 +8,7 @@ ROUTES="$ROOT/.director/routes.yaml"
 TODAY_EPOCH="$(date +%s)"
 FAIL=0
 WARN=0
+USABLE_EXECUTOR_ROUTES=0
 
 pass() { printf '  [ OK ]  %s\n' "$1"; }
 fail() { printf '  [FAIL]  %s\n' "$1"; FAIL=$((FAIL + 1)); }
@@ -159,6 +160,7 @@ else
         if [ -n "$route_reason" ]; then
           pass "$alias route unusable: $route_reason"
         else
+          USABLE_EXECUTOR_ROUTES=$((USABLE_EXECUTOR_ROUTES + 1))
           pass "$alias route usable"
         fi
         ;;
@@ -193,6 +195,9 @@ else
       fi
     fi
   done
+  if [ "$USABLE_EXECUTOR_ROUTES" -eq 0 ]; then
+    fail "zero usable executor routes; preflight cannot launch work"
+  fi
   [ "$FAIL" -eq 0 ] && pass "every alias resolved, dated, and fresh"
 fi
 
