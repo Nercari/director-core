@@ -120,3 +120,71 @@ Not unit failures — false or unusable enforcement claims found by direct probe
 |---|---|---|---|
 | 2026-07-28 | registered strong-executor invocation rejected by the API | n/a — invocation defect | The schema used a construct structured output cannot express, and structured output also requires every property to be required, which this intentionally optional-field contract cannot satisfy; fixed by dropping structured output from the route rather than changing the contract |
 | 2026-07-28 | permission-bypass requirement refuted | n/a — registry defect | A headless probe ran without a bypass when the invocation granted the working directory and the tool allowlist covered the tools needed |
+
+## Orchestrator-executor system defects, found 2026-07-28
+
+Not unit failures. Found while orchestrating unit `unrestricted-baseline` (#28)
+and then attempting to route the next unit in the #27 chain. Recorded here
+because §13.3 gates every addition on a failure appearing twice, and several of
+these are further instances of patterns already logged above.
+
+| # | What | Class | Evidence |
+|---|---|---|---|
+| 1 | Layer 2 review is mandatory and has no route | registry gap | AGENTS.md forbids reviewing with the executor's vendor; rule 6 forbids invoking anything not in `routes.yaml`. The registry names no reviewer route. `layer2: cross-vendor` appears only as a property of `capacity_states`, not as an invocable route |
+| 2 | Rule 7 has no enforcement point | unenforced rule | `.director/current-handoff.json` does not exist. Unit #28 completed with no handoff, and nothing objected |
+| 3 | `preflight.sh` cannot answer its own hook question | check measures the wrong thing | It reported `CLAUDE_PROJECT_DIR is unset — cannot confirm the hooks are wired`, in a session where `block-dangerous-bash.sh` fired and resolved that variable correctly. Preflight inspects the orchestrator's shell, not the hook runtime |
+| 4 | `preflight.sh` warns on the correct state | warning-fatigue defect | `[WARN] on branch 'task/<unit>', not main`. A unit must be on a task branch |
+| 5 | Route availability is not machine-checked | unenforced rule | Blueprint §175 states it outright: no script reads `quarantined`, `jail_verified`, or a missing `invoke` key. Only the orchestrator reading the YAML by eye stopped a quarantined route being used |
+| 6 | Duplicated registry state has drifted | stale duplicate | Blueprint §7.2's inline copy says `EXEC_STRONG: quarantined: true`; `routes.yaml` says `false`. §173's precedence rule contains the damage but the second copy is wrong |
+| 7 | The #27 chain has a circular dependency | spec defect | #29 is labelled "Blocked by: None — can start immediately", but it measures drift in the bounded executor, which has no `invoke:` key. It is blocked by #31 and #32 — the very containment work it was meant to inform |
+| 8 | The worktree lock cannot detect a dead owner | partial control | `worktree.sh` records `unit_id` but no PID or timestamp. A crashed orchestrator leaves a lock whose documented remedy is manual removal. One writer is enforced; one *live* writer is not. #33 covers the cross-project half; this half is uncovered |
+
+**Defect 2 was committed by this orchestrator, not merely observed by it.** Unit
+#28 ran without a worktree, without a work-unit packet, without
+`validate-result.sh`, and without a handoff. It ran in capacity state C′ —
+DIRECT execution with self-review — and that state was never declared. C′
+forbids auto-merge and requires treating every change as behavior-changing.
+Neither obligation was consciously discharged, because nothing asked.
+
+**Defects 3 and 5 are the sixth and seventh instances of the pattern already
+named above:** a check that reports success by not looking, and a declaration
+nobody exercised. The bar in §13.3 was met several instances ago. Defect 5 is
+the one with a mechanical fix available — `quarantined`, `jail_verified`, and a
+missing `invoke` key are three fields a script can read — and #27 already scopes
+it out as "its own unit".
+
+### Five more, found by actually running a unit through the pipeline
+
+Defects 1 to 8 were found by reading. These were found by attempting the
+documented flow end to end, which is the only way any of them could surface.
+
+| # | What | Class | Evidence |
+|---|---|---|---|
+| 9 | The write hook could never allow anything | broken control, **fixed here** | `block-out-of-scope-write.sh` normalised backslashes but not the drive-letter form. `worktree.sh` writes `/c/Users/...` into `active-worktree`; the harness proposes `C:/Users/...`; the `case` match could never succeed. Every write was denied while a unit was in flight, including writes inside the worktree the hook exists to permit. Probed against the committed version: old hook denied both the in-worktree and the out-of-scope write; fixed hook allows the first and still denies the second |
+| 10 | Two hooks deadlock at end of cycle | control conflict | `require-handoff.sh` demands `.director/current-handoff.json`, which sits outside the active worktree, so defect 9's hook forbids writing it. Escaping it required releasing the worktree first — legitimate only because that unit had not started |
+| 11 | A packet required a test the jail makes impossible | packet defect, orchestrator's | `bash scripts/preflight.sh` was listed as an executor required test. Preflight verifies `gh` and subscription auth, which `exec-jail.sh` strips by design, so a jailed executor can never pass it. Guaranteed `status: blocked`. One focused correction, on that diagnosis, fixed the packet |
+| 12 | The executor cannot deliver its result where the gate reads it | structural | `validate-result.sh` reads `$ROOT/.director/runs/<unit>/` in the main repo; the write hook confines the executor to the worktree. The orchestrator must relay the artifacts by shell copy, and cannot use its own write tool to do so while the unit is in flight |
+| 13 | A control's own prose trips the control | false positive | `block-dangerous-bash.sh` matches the whole command string, so a commit message *describing* an executor invocation was denied as "headless agent call with no timeout" |
+
+**And the reason defect 9 survived this long:** `.claude/hooks/selftest.sh`
+asserts "allowed: inside active worktree" and has always passed, because it
+builds both sides of the comparison in the same MSYS path form. It never fed the
+hook the Windows form the real harness sends. That is the eighth instance of the
+pattern: a check that passes by not looking at the real input.
+
+**Also observed, minor:** `worktree.sh create` always passes `-b`, so it cannot
+resume a unit whose branch already exists, and branch deletion is blocked by
+`block-dangerous-bash.sh`. A restarted unit must therefore be renamed. That is
+why `route-availability-gate` became `route-availability-check`.
+
+**One thing that worked, and is worth recording as a success:** confronted with
+defect 11, the executor stopped, reported the exact reason, refused to work
+around it, and touched nothing outside its declared paths. Rule 2a says never to
+trust an executor's exit code or prose — the orchestrator diffed the working
+tree and confirmed it independently. The check found nothing wrong, which is the
+outcome the check exists to be able to report honestly.
+
+**Defect 1 is the most serious and has no cheap fix.** Every unit merged so far
+has either violated rule 6 or performed self-review while recording cross-vendor
+review. Which of those it was cannot be determined from the record, and that is
+itself the finding: the review tier leaves no evidence of which model reviewed.
