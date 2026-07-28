@@ -21,11 +21,5 @@
     "deviations_from_plan": { "type": "array", "items": { "type": "string" } },
     "wall_time_seconds": { "type": "number", "minimum": 0 }
   },
-  "not": {
-    "anyOf": [
-      { "required": ["pull_request_url"] },
-      { "required": ["branch_pushed"] }
-    ]
-  },
-  "$comment": "pull_request_url and branch_pushed are forbidden, not optional. Their presence means the executor reached the network, which means the sandbox failed. validate-result rejects on it."
+  "$comment": "pull_request_url, branch_pushed and candidate_commit are forbidden, not optional. The closed properties set rejects them, and validate-result rejects them explicitly."
 }

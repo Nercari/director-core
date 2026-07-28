@@ -111,3 +111,12 @@ not to. The route worked, but the contract had never been exercised. The
 contract now requires modified files, evidence, and a result; the orchestrator
 reviews, stages, and commits. Making `.git` writable was rejected because it
 would also grant the executor write access to the Git index and refs.
+
+## Enforcement failures observed 2026-07-28
+
+Not unit failures — false or unusable enforcement claims found by direct probes.
+
+| Date | What | §13.2 | Detail |
+|---|---|---|---|
+| 2026-07-28 | registered strong-executor invocation rejected by the API | n/a — invocation defect | The schema used a construct structured output cannot express, and structured output also requires every property to be required, which this intentionally optional-field contract cannot satisfy; fixed by dropping structured output from the route rather than changing the contract |
+| 2026-07-28 | permission-bypass requirement refuted | n/a — registry defect | A headless probe ran without a bypass when the invocation granted the working directory and the tool allowlist covered the tools needed |
