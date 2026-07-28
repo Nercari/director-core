@@ -194,8 +194,9 @@ routes:
     tool: agy -p                    # 1.1.7
     auth: subscription              # Google AI Pro, OAuth
     model: gemini-3.6-flash-medium
-    invoke: NONE — this route has no working invocation (see §7.4). Probed flags
-            `--sandbox --mode accept-edits` auto-deny every tool in headless mode.
+    invoke: NONE — this route remains quarantined (see §7.4). A 2026-07-28 probe
+            ran headlessly without a bypass when the working directory was added
+            and the tool allowlist named real directory paths covering needed tools.
     network: REACHABLE_NOT_ENFORCED # probed 2026-07-26; see §8.3 correction, §21.8
     gate_credentials: REACHABLE     # gh keyring visible to the executor
     quarantined: true               # do not route work here until enforced
@@ -228,10 +229,10 @@ These profiles describe the repository's recorded CLI roles. Executor tiers diff
 | Profile | Permission model | Sandbox behaviour | Headless behaviour | Output format | What a machine checks |
 |---|---|---|---|---|---|
 | **Orchestrator CLI** | Uses the operator's subscription/OAuth authority and is trusted to perform the Git and pull-request operations assigned to the orchestrator. | It has no executor-sandbox contract; the primary route has command-specific hooks, while the fallback has reduced enforcement. | It may drive an interactive cycle or a headless command, but remains responsible for review and lifecycle actions. | Human-readable terminal output plus any harness-native event log. | `.claude/hooks/**` checks only the commands it intercepts and the GitHub ruleset checks the protected branch; nothing enforces this profile as a whole. |
-| **Bounded executor CLI** | Is entrusted with low-ambiguity work whose permitted paths and expected result keep the blast radius small. The registry assigns that intended role to `EXEC_PRIMARY`, but quarantines the route. | Its recorded probe found that the tool's sandbox did not restrict egress, credentials, or writes outside the declared paths; the executor jail has not been verified for this route. | It is not currently usable: the headless probe auto-denied every tool permission, and the bypass that would make it run auto-approves every tool and is therefore a reason for quarantine. | No working `invoke` or successful result format is registered. | The registry records the quarantine, missing `invoke`, failed probe, and unverified jail; no current script turns those fields into an availability gate. |
-| **Trusted executor CLI** | Is entrusted with work carrying more ambiguity or a wider potential blast radius. Its work unit still declares allowed paths, and the orchestrator independently reviews the result. The registry currently assigns usable executor work to `EXEC_STRONG`. | Its registered invocation combines the executor jail with the workspace-write sandbox. A live probe verified that the jail removes gate credentials; egress remains open. | It is the only executor recorded as working headlessly without a permission-bypass flag, is not quarantined, and is the de facto primary route. | JSONL events and a final JSON object conforming to `schemas/result.schema.json`. | `scripts/exec-jail.sh` removes gate credentials and the registered `invoke` requests the output schema; the orchestrator still has to inspect the diff, and no machine assigns the “trusted” tier. |
+| **Bounded executor CLI** | Is entrusted with low-ambiguity work whose permitted paths and expected result keep the blast radius small. The registry assigns that intended role to `EXEC_PRIMARY`, but quarantines the route. | Its recorded probe found that the tool's sandbox did not restrict egress, credentials, or writes outside the declared paths; the executor jail has not been verified for this route. | A 2026-07-28 probe ran headlessly without a permission bypass when the invocation added the working directory and its tool allowlist named real directory paths covering the tools needed. | No working `invoke` or successful result format is registered while the route remains quarantined. | The registry records the quarantine, missing `invoke`, open egress, and unverified jail; no current script turns those fields into an availability gate. |
+| **Trusted executor CLI** | Is entrusted with work carrying more ambiguity or a wider potential blast radius. Its work unit still declares allowed paths, and the orchestrator independently reviews the result. The registry currently assigns usable executor work to `EXEC_STRONG`. | Its registered invocation combines the executor jail with the workspace-write sandbox. A live probe verified that the jail removes gate credentials; egress remains open. | It works headlessly without a permission-bypass flag, is not quarantined, and remains the de facto primary route while the bounded route is quarantined. | JSONL events and a final JSON object conforming to `schemas/result.schema.json`. | `scripts/exec-jail.sh` removes gate credentials and the registered `invoke` requests the output schema; the orchestrator still has to inspect the diff, and no machine assigns the “trusted” tier. |
 
-**Bounded tier and trusted tier describe how much ambiguity and blast radius the invocation is trusted with, not whether it bypasses permissions.** In the current registry, `EXEC_PRIMARY` is the intended bounded route but is unavailable, while `EXEC_STRONG` is the trusted tier and the de facto primary because it is the only usable headless executor. The aliases remain registry slots, and nothing mechanically assigns or verifies the tier vocabulary.
+**Bounded tier and trusted tier describe how much ambiguity and blast radius the invocation is trusted with, not whether it bypasses permissions.** In the current registry, `EXEC_PRIMARY` is the intended bounded route but is unavailable because egress remains open and the jail has not been probed against it, while `EXEC_STRONG` is the trusted tier and the de facto primary. The aliases remain registry slots, and nothing mechanically assigns or verifies the tier vocabulary.
 
 ### 7.2 The per-project routing interview
 
@@ -258,7 +259,7 @@ So the registry is filled from, in order of preference: **what the CLI reports**
 
 10.1 is the cautionary example: it recorded a working route as permanently broken, on recall, and deleted it. One 45-second test reversed that.
 
-### 7.4 A route that was declared and never worked
+### 7.4 A route that was declared and appeared not to work
 
 `EXEC_PRIMARY` named agy as the cheap primary executor and `EXEC_STRONG` as escalation-only. Eleven units ran. **All eleven went to `EXEC_STRONG`. Zero went to `EXEC_PRIMARY`.** The registry and the practice had disagreed since the day the registry was written, and nobody noticed because the configuration was never exercised.
 
@@ -270,11 +271,11 @@ agy -p --sandbox --mode accept-edits --print-timeout 5m "<task>"
    prompt for, so it was auto-denied"
 ```
 
-No output. No work. **The route could never have executed anything.** An orchestrator delegating to it would receive exit 0 and an empty result, which is the worst possible failure shape: silence that looks like success.
+No output. No work. **That 2026-07-26 invocation could not execute anything.** An orchestrator delegating to it would receive exit 0 and an empty result, which is the worst possible failure shape: silence that looks like success.
 
-Making it functional needs `--dangerously-skip-permissions`, which auto-approves every tool. With egress still open (§21.9) and this route already observed writing outside its declared scope, that is strictly worse than `EXEC_STRONG`, whose workspace-write mode blocks `.git` writes but is not claimed to isolate egress or credentials.
+**Superseded 2026-07-28:** the route ran headlessly through the jail without a permission-bypass flag when the invocation added the working directory and its tool allowlist covered the tools the unit needed. The allowlist entry must name a real directory path; a partial path prefix did not match.
 
-**So the registry now says what is true:** `EXEC_PRIMARY` is quarantined with `blocked_on` recorded and **no runnable `invoke:` key at all** — the probed command is kept only under `invoke_NON_FUNCTIONAL_do_not_use`, because a broken command string sitting in a field named `invoke` is an invitation. `EXEC_STRONG` is marked de facto primary.
+**So the registry now says what is true:** `EXEC_PRIMARY` is quarantined with `blocked_on` limited to open egress and the jail never having been probed against this executor, and has **no runnable `invoke:` key at all**. The 2026-07-26 command and result remain identifiable as superseded historical evidence. `EXEC_STRONG` is marked de facto primary.
 
 Unblock order, if agy is ever wanted: close egress (§21.9), re-probe `exec-jail` against agy specifically — §21.8's proof covers codex only — then reconsider.
 
@@ -866,9 +867,9 @@ git commit --allow-empty -m "checkpoint before <unit-id>"   # recovery point
 
 # 2. Executor works here — jailed (§21.8), always time-bounded, always the
 #    route in the packet, inner timeout >= outer bound.
-#    This shows EXEC_STRONG because it is the only route that executes headlessly
-#    without a permission-bypass flag. EXEC_PRIMARY has NO working invocation
-#    (§7.5) — do not substitute agy here expecting it to work.
+#    This shows EXEC_STRONG because it is the registered usable route.
+#    EXEC_PRIMARY can run headlessly without a permission-bypass flag, but remains
+#    quarantined for open egress and an executor-specific jail probe (§7.5).
 timeout 900 bash scripts/exec-jail.sh codex exec --sandbox workspace-write   --json --output-schema schemas/result.schema.json "<packet>"
 
 # 3. Validate before anything leaves the machine
