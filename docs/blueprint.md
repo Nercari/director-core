@@ -170,6 +170,12 @@ Path: `C:\Users\dorot\Documents\AI Projects\director-core\`. Public. Copied into
 
 `.director/routes.yaml` is the only file in a project containing provider names, model identifiers, quota figures, or prices.
 
+**Availability and rationale have different authorities.** `.director/routes.yaml` is authoritative for whether a route is available; the routing doctrine in this section is authoritative only for the rationale behind a choice. A route recorded as `quarantined: true` does not exist for routing purposes, regardless of what any prose calls it.
+
+**This precedence is prose, not a preflight control.** No script currently reads the route fields `quarantined` or `jail_verified`, or treats the absence of an `invoke` key as making a route unavailable. In particular, `scripts/preflight.sh` does not read any of those three signals, so nothing mechanically enforces this precedence rule today.
+
+**The model-name gate has narrower coverage than the convention.** The `No model name outside routes.yaml` step in `.github/workflows/gate.yml` scans shell, YAML, JSON, and Python files; it does not scan Markdown. The gate enforces its pattern only in those scanned formats. In Markdown, the no-model-names rule is a convention and nothing guards it.
+
 ```yaml
 routes:
   ORCH_PRIMARY:
@@ -214,6 +220,18 @@ routes:
 **`forbidden_models` is not optional.** `agy models` reports `claude-sonnet-4-6` and `claude-opus-4-6-thinking` among its options. An executor running a Claude model turns Layer 2 into Claude reviewing Claude, and §2's independence argument dies with nothing in the system detecting it. The same applies to `gpt-oss-*` against `ORCH_FALLBACK`.
 
 **Structural capacity facts** (properties of the plans, not of any model): Claude Pro pools Claude Code with claude.ai and the desktop app, so orchestration competes with ordinary daily use. ChatGPT Plus has per-window and weekly limits. Google AI Pro has its own limits. No vendor publishes exact numbers. A local model has no cap and no marginal cost, but consumes your machine.
+
+### 7.1.1 CLI capability profiles
+
+These profiles describe the repository's recorded CLI roles. Executor tiers differ by the ambiguity and blast radius of the work entrusted to an invocation, not by an alias, a model, or a permission bypass:
+
+| Profile | Permission model | Sandbox behaviour | Headless behaviour | Output format | What a machine checks |
+|---|---|---|---|---|---|
+| **Orchestrator CLI** | Uses the operator's subscription/OAuth authority and is trusted to perform the Git and pull-request operations assigned to the orchestrator. | It has no executor-sandbox contract; the primary route has command-specific hooks, while the fallback has reduced enforcement. | It may drive an interactive cycle or a headless command, but remains responsible for review and lifecycle actions. | Human-readable terminal output plus any harness-native event log. | `.claude/hooks/**` checks only the commands it intercepts and the GitHub ruleset checks the protected branch; nothing enforces this profile as a whole. |
+| **Bounded executor CLI** | Is entrusted with low-ambiguity work whose permitted paths and expected result keep the blast radius small. The registry assigns that intended role to `EXEC_PRIMARY`, but quarantines the route. | Its recorded probe found that the tool's sandbox did not restrict egress, credentials, or writes outside the declared paths; the executor jail has not been verified for this route. | It is not currently usable: the headless probe auto-denied every tool permission, and the bypass that would make it run auto-approves every tool and is therefore a reason for quarantine. | No working `invoke` or successful result format is registered. | The registry records the quarantine, missing `invoke`, failed probe, and unverified jail; no current script turns those fields into an availability gate. |
+| **Trusted executor CLI** | Is entrusted with work carrying more ambiguity or a wider potential blast radius. Its work unit still declares allowed paths, and the orchestrator independently reviews the result. The registry currently assigns usable executor work to `EXEC_STRONG`. | Its registered invocation combines the executor jail with the workspace-write sandbox. A live probe verified that the jail removes gate credentials; egress remains open. | It is the only executor recorded as working headlessly without a permission-bypass flag, is not quarantined, and is the de facto primary route. | JSONL events and a final JSON object conforming to `schemas/result.schema.json`. | `scripts/exec-jail.sh` removes gate credentials and the registered `invoke` requests the output schema; the orchestrator still has to inspect the diff, and no machine assigns the “trusted” tier. |
+
+**Bounded tier and trusted tier describe how much ambiguity and blast radius the invocation is trusted with, not whether it bypasses permissions.** In the current registry, `EXEC_PRIMARY` is the intended bounded route but is unavailable, while `EXEC_STRONG` is the trusted tier and the de facto primary because it is the only usable headless executor. The aliases remain registry slots, and nothing mechanically assigns or verifies the tier vocabulary.
 
 ### 7.2 The per-project routing interview
 
@@ -343,6 +361,8 @@ Target 1,500–4,000 tokens. **A unit whose objective and acceptance criteria ca
 **The orchestrator stages and commits only after reviewing the diff.** `output_contract` deliberately excludes a candidate commit, `branch_pushed`, and `pull_request`. See §8.3.
 
 ### 8.3 Result, and the executor's boundary
+
+The orchestrator creates the worktree and its `task/<unit-id>` branch before spawning the executor, so the executor always writes its result on an existing branch. `scripts/worktree.sh create` mechanically creates both and records them; no script launches the executor or verifies this ordering, so the before-spawn requirement itself remains prose.
 
 ```json
 {
@@ -603,7 +623,9 @@ Kept apart because a change can satisfy every convention and still do the wrong 
 
 **Review is never delegated to `EXEC_LOCAL`.** See §17.1 — low correlation times low capability is not a useful reviewer.
 
-**Review is never performed by a model from the executor's vendor.** Enforced by `forbidden_models` (§7.1) and by refusing auto-merge in state C′ (§7.5).
+**Review is never performed by a model from the executor's vendor.**
+
+**Current logs cannot decide vendor independence.** `scripts/telemetry/ingest.py` records a provider for each invocation, but no logged record links a particular reviewer invocation to the executor invocation it reviews or records the comparison between them. Nothing currently computes or enforces that relationship from telemetry.
 
 ---
 
