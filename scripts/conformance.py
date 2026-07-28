@@ -493,6 +493,64 @@ def scenario_route_availability() -> tuple[bool, str]:
         return False, f"fixture could not be built or exercised: {error}"
 
 
+def scenario_route_availability_gate() -> tuple[bool, str]:
+    all_quarantined_routes = """routes:
+  ORCH_PRIMARY:
+    model: default
+    last_verified: 2026-07-26
+  ORCH_FALLBACK:
+    model: default
+    last_verified: 2026-07-26
+  EXEC_PRIMARY:
+    model: primary-fixture
+    invoke: scripts/exec-jail.sh primary-fixture
+    quarantined: true
+    jail_verified: true
+    last_verified: 2026-07-26
+  EXEC_STRONG:
+    model: strong-fixture
+    invoke: scripts/exec-jail.sh strong-fixture
+    quarantined: true
+    jail_verified: true
+    last_verified: 2026-07-26
+  EXEC_LOCAL:
+    model: local-fixture
+    invoke: scripts/exec-jail.sh local-fixture
+    quarantined: true
+    jail_verified: true
+    state: absent
+    last_verified: 2026-07-26
+"""
+    usable_strong_route = all_quarantined_routes.replace(
+        """  EXEC_STRONG:
+    model: strong-fixture
+    invoke: scripts/exec-jail.sh strong-fixture
+    quarantined: true
+    jail_verified: true
+""",
+        """  EXEC_STRONG:
+    model: strong-fixture
+    invoke: scripts/exec-jail.sh strong-fixture
+    quarantined: false
+    jail_verified: true
+""",
+    )
+    try:
+        unavailable = run_preflight_with_routes(all_quarantined_routes)
+        if unavailable.returncode == 0:
+            return False, "preflight accepted a registry with zero usable executor routes"
+        expected_line = "zero usable executor routes; preflight cannot launch work"
+        if expected_line not in unavailable.output:
+            return False, "preflight did not name the zero-usable-route launch failure"
+
+        available = run_preflight_with_routes(usable_strong_route)
+        if available.returncode != 0:
+            return False, f"preflight rejected a registry with EXEC_STRONG usable: {available.output}"
+        return True, "preflight rejects zero usable executor routes and accepts one usable route"
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
 @dataclass(frozen=True)
 class AttributionCase:
     name: str
@@ -680,6 +738,7 @@ def main() -> int:
         scenario_defect_five_future_verification(),
         scenario_stopped_terminal_outcomes(),
         scenario_route_availability(),
+        scenario_route_availability_gate(),
     )
     all_passed = True
     for index, (passed, reason) in enumerate(outcomes, 1):
