@@ -372,7 +372,7 @@ def preflight_fixture_routes(primary_block: str) -> str:
 """
 
 
-def run_preflight_fixture(primary_block: str) -> Command:
+def run_preflight_with_routes(routes: str) -> Command:
     if BASH is None:
         raise RuntimeError("bash is required to exercise scripts/preflight.sh")
     with tempfile.TemporaryDirectory(prefix="director-preflight-") as temporary:
@@ -383,7 +383,7 @@ def run_preflight_fixture(primary_block: str) -> Command:
         scripts.mkdir(parents=True)
         fake_bin.mkdir()
         shutil.copy2(PREFLIGHT_SOURCE, scripts / "preflight.sh")
-        write_text(root / ".director" / "routes.yaml", preflight_fixture_routes(primary_block))
+        write_text(root / ".director" / "routes.yaml", routes)
         checked(["git", "init", "--initial-branch=main", str(root)])
         checked(["git", "-C", str(root), "config", "user.email", "conformance@example.invalid"])
         checked(["git", "-C", str(root), "config", "user.name", "Conformance fixture"])
@@ -411,6 +411,10 @@ def run_preflight_fixture(primary_block: str) -> Command:
         return Command(completed.returncode, completed.stdout)
 
 
+def run_preflight_fixture(primary_block: str) -> Command:
+    return run_preflight_with_routes(preflight_fixture_routes(primary_block))
+
+
 def scenario_defect_four_forbidden_model() -> tuple[bool, str]:
     try:
         result = run_preflight_fixture(
@@ -435,6 +439,50 @@ def scenario_defect_five_future_verification() -> tuple[bool, str]:
         if "EXEC_PRIMARY last_verified is in the future: 2099-01-01" not in result.output:
             return False, "preflight did not identify the future verification date"
         return True, "preflight rejects a future last_verified date"
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
+def scenario_route_availability() -> tuple[bool, str]:
+    routes = """routes:
+  ORCH_PRIMARY:
+    model: default
+    last_verified: 2026-07-26
+  ORCH_FALLBACK:
+    model: default
+    last_verified: 2026-07-26
+  EXEC_PRIMARY:
+    model: primary-fixture
+    quarantined: false
+    jail_verified: true
+    last_verified: 2026-07-26
+  EXEC_STRONG:
+    model: strong-fixture
+    invoke: scripts/exec-jail.sh strong-fixture
+    quarantined: true
+    jail_verified: false
+    last_verified: 2026-07-26
+  EXEC_LOCAL:
+    model: local-fixture
+    invoke: scripts/exec-jail.sh local-fixture
+    quarantined: false
+    jail_verified: true
+    state: active
+    last_verified: 2026-07-26
+"""
+    try:
+        result = run_preflight_with_routes(routes)
+        if result.returncode != 0:
+            return False, f"availability declarations made preflight exit {result.returncode}"
+        expected_lines = (
+            "EXEC_PRIMARY route unusable: invoke key absent",
+            "EXEC_STRONG route unusable: quarantined; jail not verified",
+            "EXEC_LOCAL route usable",
+        )
+        missing = [line for line in expected_lines if line not in result.output]
+        if missing:
+            return False, f"preflight omitted availability verdict: {missing[0]}"
+        return True, "preflight distinguishes unusable route reasons and confirms a usable route"
     except Exception as error:
         return False, f"fixture could not be built or exercised: {error}"
 
@@ -615,6 +663,7 @@ def main() -> int:
         scenario_defect_four_forbidden_model(),
         scenario_defect_five_future_verification(),
         scenario_stopped_terminal_outcomes(),
+        scenario_route_availability(),
     )
     all_passed = True
     for index, (passed, reason) in enumerate(outcomes, 1):
