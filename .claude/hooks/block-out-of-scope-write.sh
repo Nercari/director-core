@@ -16,11 +16,31 @@ deny() {
   exit 2
 }
 
-# Normalise to forward slashes so Windows and POSIX forms compare alike.
-# shellcheck disable=SC1003
-norm="$(printf '%s' "$path" | tr '\\' '/')"
-# shellcheck disable=SC1003
-vault_norm="$(printf '%s' "$VAULT_WIN" | tr '\\' '/')"
+# Normalise to forward slashes so Windows and POSIX forms compare alike, AND
+# fold the drive-letter form so C:/Users/... compares equal to /c/Users/...
+#
+# The slash half alone was not enough and the gap was load-bearing:
+# worktree.sh computes the worktree path in Git Bash, so .director/active-worktree
+# holds /c/Users/..., while the harness proposing the write supplies C:/Users/...
+# The case match below could therefore never succeed, and EVERY write was denied
+# while a unit was in flight — including writes inside the worktree this hook
+# exists to permit. It failed closed, so nothing unsafe got through; it also
+# meant the allow path had never once executed.
+norm_path() {
+  local p drive
+  # shellcheck disable=SC1003
+  p="$(printf '%s' "$1" | tr '\\' '/')"
+  case "$p" in
+  [A-Za-z]:/*)
+    drive="$(printf '%s' "${p%%:*}" | tr 'A-Z' 'a-z')"
+    p="/$drive/${p#*:/}"
+    ;;
+  esac
+  printf '%s' "$p"
+}
+
+norm="$(norm_path "$path")"
+vault_norm="$(norm_path "$VAULT_WIN")"
 
 # --- the vault ---------------------------------------------------------------
 case "$norm" in
@@ -37,8 +57,7 @@ esac
 # When a unit is running, .director/active-worktree names the only writable root.
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo "")"
 if [ -n "$ROOT" ] && [ -f "$ROOT/.director/active-worktree" ]; then
-  # shellcheck disable=SC1003
-  active="$(tr -d '\r\n' < "$ROOT/.director/active-worktree" | tr '\\' '/')"
+  active="$(norm_path "$(tr -d '\r\n' < "$ROOT/.director/active-worktree")")"
   if [ -n "$active" ]; then
     case "$norm" in
     "$active"/*) exit 0 ;;
