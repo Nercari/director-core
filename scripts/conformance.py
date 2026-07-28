@@ -37,16 +37,22 @@ class Command:
 
 def run(command: Iterable[str], cwd: Optional[Path] = None) -> Command:
     """Run a bounded command and retain combined output for an assertion."""
+    # encoding is pinned to utf-8 rather than left to text=True's platform
+    # default. On Windows that default is cp1252 (locale.getpreferredencoding()),
+    # which corrupts every multi-byte UTF-8 character the bash scripts under
+    # test emit -- silently, since decode errors are not the same failure shape
+    # as a real assertion mismatch. errors="replace" keeps a decoding surprise
+    # from crashing the runner; a replacement character in an assertion message
+    # is a visible clue, not a hidden one.
     completed = subprocess.run(
         list(command),
         cwd=str(cwd) if cwd is not None else None,
-        text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         timeout=45,
         check=False,
     )
-    return Command(completed.returncode, completed.stdout)
+    return Command(completed.returncode, completed.stdout.decode("utf-8", errors="replace"))
 
 
 def checked(command: Iterable[str], cwd: Optional[Path] = None) -> str:
@@ -218,7 +224,7 @@ def scenario_two(break_fixture: bool) -> tuple[bool, str]:
             fixture.write_packet(allowed_paths, ["test -f allowed.txt"])
             fixture.write_result(["test -f allowed.txt"])
             return expect_validator_reject(
-                fixture, "files changed outside declared paths â€” REJECT:"
+                fixture, "files changed outside declared paths — REJECT:"
             )
     except Exception as error:
         return False, f"fixture could not be built or exercised: {error}"
@@ -232,7 +238,7 @@ def scenario_three() -> tuple[bool, str]:
             fixture.write_result([])
             return expect_validator_reject(
                 fixture,
-                "required tests declared but none run, and no blocker reported â€” REJECT",
+                "required tests declared but none run, and no blocker reported — REJECT",
             )
     except Exception as error:
         return False, f"fixture could not be built or exercised: {error}"
@@ -327,7 +333,7 @@ def scenario_defect_two_missing_base_commit() -> tuple[bool, str]:
             write_text(fixture.run_directory / "worktree.yaml", "unit_id: missing-base-commit\n")
             fixture.write_result(["test -f allowed.txt"])
             return expect_validator_reject(
-                fixture, "base_commit is missing or empty â€” REJECT"
+                fixture, "base_commit is missing or empty — REJECT"
             )
     except Exception as error:
         return False, f"fixture could not be built or exercised: {error}"
@@ -335,10 +341,10 @@ def scenario_defect_two_missing_base_commit() -> tuple[bool, str]:
 
 def scenario_defect_three_result_invariants() -> tuple[bool, str]:
     cases = (
-        ("unknown-status", {"status": "not-completed"}, "status=not-completed is not allowed â€” REJECT"),
-        ("bad-branch", {"status": "blocked", "branch": "main", "route_used": "DIRECT"}, "branch=main does not match task/<unit-id> â€” REJECT"),
-        ("missing-route", {"status": "blocked", "branch": "task/missing-route"}, "route_used is missing or empty â€” REJECT"),
-        ("forbidden-key", {"status": "blocked", "branch": "task/forbidden-key", "route_used": "DIRECT", "pull_request_url": "https://example.invalid/pr/1"}, "result contains forbidden key pull_request_url â€” REJECT"),
+        ("unknown-status", {"status": "not-completed"}, "status=not-completed is not allowed — REJECT"),
+        ("bad-branch", {"status": "blocked", "branch": "main", "route_used": "DIRECT"}, "branch=main does not match task/<unit-id> — REJECT"),
+        ("missing-route", {"status": "blocked", "branch": "task/missing-route"}, "route_used is missing or empty — REJECT"),
+        ("forbidden-key", {"status": "blocked", "branch": "task/forbidden-key", "route_used": "DIRECT", "pull_request_url": "https://example.invalid/pr/1"}, "result contains forbidden key pull_request_url — REJECT"),
     )
     try:
         for unit, result, expected in cases:
@@ -487,6 +493,64 @@ def scenario_route_availability() -> tuple[bool, str]:
         return False, f"fixture could not be built or exercised: {error}"
 
 
+def scenario_route_availability_gate() -> tuple[bool, str]:
+    all_quarantined_routes = """routes:
+  ORCH_PRIMARY:
+    model: default
+    last_verified: 2026-07-26
+  ORCH_FALLBACK:
+    model: default
+    last_verified: 2026-07-26
+  EXEC_PRIMARY:
+    model: primary-fixture
+    invoke: scripts/exec-jail.sh primary-fixture
+    quarantined: true
+    jail_verified: true
+    last_verified: 2026-07-26
+  EXEC_STRONG:
+    model: strong-fixture
+    invoke: scripts/exec-jail.sh strong-fixture
+    quarantined: true
+    jail_verified: true
+    last_verified: 2026-07-26
+  EXEC_LOCAL:
+    model: local-fixture
+    invoke: scripts/exec-jail.sh local-fixture
+    quarantined: true
+    jail_verified: true
+    state: absent
+    last_verified: 2026-07-26
+"""
+    usable_strong_route = all_quarantined_routes.replace(
+        """  EXEC_STRONG:
+    model: strong-fixture
+    invoke: scripts/exec-jail.sh strong-fixture
+    quarantined: true
+    jail_verified: true
+""",
+        """  EXEC_STRONG:
+    model: strong-fixture
+    invoke: scripts/exec-jail.sh strong-fixture
+    quarantined: false
+    jail_verified: true
+""",
+    )
+    try:
+        unavailable = run_preflight_with_routes(all_quarantined_routes)
+        if unavailable.returncode == 0:
+            return False, "preflight accepted a registry with zero usable executor routes"
+        expected_line = "zero usable executor routes; preflight cannot launch work"
+        if expected_line not in unavailable.output:
+            return False, "preflight did not name the zero-usable-route launch failure"
+
+        available = run_preflight_with_routes(usable_strong_route)
+        if available.returncode != 0:
+            return False, f"preflight rejected a registry with EXEC_STRONG usable: {available.output}"
+        return True, "preflight rejects zero usable executor routes and accepts one usable route"
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
 @dataclass(frozen=True)
 class AttributionCase:
     name: str
@@ -578,13 +642,17 @@ def authentication_refusal(result: Command) -> bool:
     return result.returncode != 0 and any(marker in lowered for marker in markers)
 
 
-def scenario_five() -> tuple[bool, str]:
+def scenario_five() -> tuple[Optional[bool], str]:
     if not JAIL.is_file():
         return False, "required scripts/exec-jail.sh is missing"
     if BASH is None:
         return False, "bash is required to probe scripts/exec-jail.sh"
+    # This is the only scenario that probes the host's real gate credentials
+    # rather than a fixture, so it is the only one whose prerequisite can be
+    # legitimately absent. Reported as SKIP, not PASS: a machine without gh has
+    # not verified the jail, and must not be told that it has.
     if shutil.which("gh") is None:
-        return False, "gh is required; capability absence cannot be probed without it"
+        return None, "SKIPPED: gh absent, so gate-capability removal cannot be probed here"
 
     try:
         branch = f"refs/heads/director-conformance-baseline-{os.getpid()}"
@@ -636,10 +704,16 @@ def scenario_five() -> tuple[bool, str]:
     return True, "gate capability absent; unjailed baseline authenticated; egress remains open (documented residual)"
 
 
-def report(number: int, passed: bool, reason: str) -> bool:
-    state = "PASS" if passed else "FAIL"
+def report(number: int, passed: Optional[bool], reason: str) -> bool:
+    """Print one scenario outcome and report whether it blocks the suite.
+
+    A skipped scenario (``passed is None``) does not fail the run, but it is
+    never printed as a pass — an unrun check is an unknown check, and the
+    distinction is the point of §13.3's failure log.
+    """
+    state = "SKIP" if passed is None else ("PASS" if passed else "FAIL")
     print(f"{state} scenario {number}: {reason}")
-    return passed
+    return passed is not False
 
 
 def main() -> int:
@@ -664,13 +738,18 @@ def main() -> int:
         scenario_defect_five_future_verification(),
         scenario_stopped_terminal_outcomes(),
         scenario_route_availability(),
+        scenario_route_availability_gate(),
     )
     all_passed = True
     for index, (passed, reason) in enumerate(outcomes, 1):
         all_passed = report(index, passed, reason) and all_passed
+    skipped = sum(1 for passed, _ in outcomes if passed is None)
     if not all_passed:
         print("CONFORMANCE FAILED")
         return 1
+    if skipped:
+        print(f"CONFORMANCE PASSED — {skipped} scenario(s) skipped for an absent prerequisite")
+        return 0
     print("CONFORMANCE PASSED")
     return 0
 
