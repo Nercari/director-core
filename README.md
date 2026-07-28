@@ -2,7 +2,7 @@
 
 The reusable core of the Director orchestration workflow. Copied into every project at setup.
 
-The full design, its reasoning, and its verified environment facts live in **[`docs/blueprint.md`](docs/blueprint.md)** (revision 10.2).
+The full design, its reasoning, and its verified environment facts live in **[`docs/blueprint.md`](docs/blueprint.md)**. Check that file's own header for the current revision — this README does not restate the number, because the two have drifted before.
 
 ## What lives here
 
@@ -10,8 +10,8 @@ The full design, its reasoning, and its verified environment facts live in **[`d
 |---|---|
 | `AGENTS.md` | Director rules — the single canonical source, read natively by Codex and Antigravity |
 | `CLAUDE.md` | One line: `@AGENTS.md`. A bridge for Claude Code, which does not read `AGENTS.md` |
-| `scripts/` | `preflight`, `worktree`, `validate-result` — three, and only three |
-| `.claude/hooks/` | The ten deterministic invariants (§15.1) |
+| `scripts/` | `preflight`, `worktree`, `validate-result`, `exec-jail`, and their supporting scripts — see the directory, not this table, for the current list |
+| `.claude/hooks/` | The deterministic invariants (§15.1) — see the directory, not this table, for the current list |
 | `.github/workflows/gate.yml` | The credential-free CI gate |
 | `schemas/` | Work-unit and result contracts |
 | `docs/blueprint.md` | This system's specification |
@@ -40,4 +40,4 @@ Commits here use a GitHub noreply address deliberately: an email in public histo
 
 ## Status
 
-Pre-Phase 0. Only the blueprint exists. See §18 for the implementation sequence and its prerequisites.
+Past Pre-Phase 0. The scripts, hooks, schemas, and CI gate this table lists are implemented and exercised by merged pull requests, not aspirational. This line will go stale exactly the way the two lines above it did — trust `git log` and the directory contents over this file for current state, and see §18 of the blueprint for the phase sequence.

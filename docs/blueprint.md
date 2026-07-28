@@ -172,51 +172,11 @@ Path: `C:\Users\dorot\Documents\AI Projects\director-core\`. Public. Copied into
 
 **Availability and rationale have different authorities.** `.director/routes.yaml` is authoritative for whether a route is available; the routing doctrine in this section is authoritative only for the rationale behind a choice. A route recorded as `quarantined: true` does not exist for routing purposes, regardless of what any prose calls it.
 
-**This precedence is prose, not a preflight control.** No script currently reads the route fields `quarantined` or `jail_verified`, or treats the absence of an `invoke` key as making a route unavailable. In particular, `scripts/preflight.sh` does not read any of those three signals, so nothing mechanically enforces this precedence rule today.
+**This precedence is now partly a preflight control, not only prose.** `scripts/preflight.sh` reads `quarantined`, `jail_verified`, and the presence of an `invoke` key for each executor alias, reports a per-route usable/unusable verdict, and refuses to launch work when no executor route is usable at all. It does not yet refuse to *invoke* a specific route it has reported unusable — that remains a read, not a block, on the per-route decision. Check `scripts/preflight.sh` itself for the current state of that gate rather than trusting this paragraph, which has already gone stale once: the prior text here claimed no script read these fields at all, after a unit had already made two of the three machine-checked.
 
-**The model-name gate has narrower coverage than the convention.** The `No model name outside routes.yaml` step in `.github/workflows/gate.yml` scans shell, YAML, JSON, and Python files; it does not scan Markdown. The gate enforces its pattern only in those scanned formats. In Markdown, the no-model-names rule is a convention and nothing guards it.
+**The model-name gate has narrower coverage than the convention.** The `No model name outside routes.yaml` step in `.github/workflows/gate.yml` scans shell, YAML, JSON, and Python files; it does not scan Markdown. The gate enforces its pattern only in those scanned formats. In Markdown, the no-model-names rule is a convention and nothing guards it — a gap this document itself illustrates, since the removed block below named concrete model identifiers in a `.md` file the gate never scanned.
 
-```yaml
-routes:
-  ORCH_PRIMARY:
-    tool: claude                    # 2.1.220
-    auth: subscription              # Claude Pro, OAuth
-    model: <filled at setup>
-    note: the only route with hooks
-    last_verified: 2026-07-25
-  ORCH_FALLBACK:
-    tool: codex                     # 0.144.5
-    auth: subscription              # "Logged in using ChatGPT"
-    model: <filled at setup>
-    enforcement: reduced            # no hooks
-    last_verified: 2026-07-25
-  EXEC_PRIMARY:
-    tool: agy -p                    # 1.1.7
-    auth: subscription              # Google AI Pro, OAuth
-    model: gemini-3.6-flash-medium
-    invoke: NONE — this route remains quarantined (see §7.4). A 2026-07-28 probe
-            ran headlessly without a bypass when the working directory was added
-            and the tool allowlist named real directory paths covering needed tools.
-    network: REACHABLE_NOT_ENFORCED # probed 2026-07-26; see §8.3 correction, §21.8
-    gate_credentials: REACHABLE     # gh keyring visible to the executor
-    quarantined: true               # do not route work here until enforced
-    forbidden_models: [ "claude-*", "gpt-oss-*" ]
-    last_verified: 2026-07-26
-  EXEC_STRONG:
-    tool: codex exec
-    auth: subscription
-    model: <filled at setup>
-    use: escalation only, on a named capability delta
-    network: REACHABLE_NOT_ENFORCED # probed 2026-07-26; same gap as EXEC_PRIMARY
-    gate_credentials: REACHABLE
-    quarantined: true
-    last_verified: 2026-07-26
-  EXEC_LOCAL:
-    tool: lmstudio                  # gemma-4-12b-agentic-fable5-composer2.5-v2-3.5x-tau2, Q4_K_M, 7.38 GB
-    auth: local
-    state: absent                   # absent | candidate | active — §17.1
-    last_verified: 2026-07-25
-```
+**The registry snapshot that used to live in this section has been removed.** It duplicated `.director/routes.yaml` and drifted from it repeatedly — five fields wrong as of 2026-07-28, including `EXEC_STRONG.quarantined`, the one field whose wrong value would have told a reader the only usable executor route was unusable. A snapshot that inverts the quarantine status of the route actually in use is worse than no snapshot. `.director/routes.yaml` is authoritative; read it directly, not a copy of it here.
 
 **`forbidden_models` is not optional.** `agy models` reports `claude-sonnet-4-6` and `claude-opus-4-6-thinking` among its options. An executor running a Claude model turns Layer 2 into Claude reviewing Claude, and §2's independence argument dies with nothing in the system detecting it. The same applies to `gpt-oss-*` against `ORCH_FALLBACK`.
 
@@ -229,7 +189,7 @@ These profiles describe the repository's recorded CLI roles. Executor tiers diff
 | Profile | Permission model | Sandbox behaviour | Headless behaviour | Output format | What a machine checks |
 |---|---|---|---|---|---|
 | **Orchestrator CLI** | Uses the operator's subscription/OAuth authority and is trusted to perform the Git and pull-request operations assigned to the orchestrator. | It has no executor-sandbox contract; the primary route has command-specific hooks, while the fallback has reduced enforcement. | It may drive an interactive cycle or a headless command, but remains responsible for review and lifecycle actions. | Human-readable terminal output plus any harness-native event log. | `.claude/hooks/**` checks only the commands it intercepts and the GitHub ruleset checks the protected branch; nothing enforces this profile as a whole. |
-| **Bounded executor CLI** | Is entrusted with low-ambiguity work whose permitted paths and expected result keep the blast radius small. The registry assigns that intended role to `EXEC_PRIMARY`, but quarantines the route. | Its recorded probe found that the tool's sandbox did not restrict egress, credentials, or writes outside the declared paths; the executor jail has not been verified for this route. | A 2026-07-28 probe ran headlessly without a permission bypass when the invocation added the working directory and its tool allowlist named real directory paths covering the tools needed. | No working `invoke` or successful result format is registered while the route remains quarantined. | The registry records the quarantine, missing `invoke`, open egress, and unverified jail; no current script turns those fields into an availability gate. |
+| **Bounded executor CLI** | Is entrusted with low-ambiguity work whose permitted paths and expected result keep the blast radius small. The registry assigns that intended role to `EXEC_PRIMARY`, but quarantines the route. | Its recorded probe found that the tool's sandbox did not restrict egress, credentials, or writes outside the declared paths; the executor jail has not been verified for this route. | A 2026-07-28 probe ran headlessly without a permission bypass when the invocation added the working directory and its tool allowlist named real directory paths covering the tools needed. | No working `invoke` or successful result format is registered while the route remains quarantined. | `scripts/preflight.sh` now reads the registry's quarantine, missing-`invoke`, and jail-verification fields and reports this route unusable; see the note above §7.1.1's registry pointer for exactly what that gate does and does not yet enforce. |
 | **Trusted executor CLI** | Is entrusted with work carrying more ambiguity or a wider potential blast radius. Its work unit still declares allowed paths, and the orchestrator independently reviews the result. The registry currently assigns usable executor work to `EXEC_STRONG`. | Its registered invocation combines the executor jail with the workspace-write sandbox. A live probe verified that the jail removes gate credentials; egress remains open. | It works headlessly without a permission-bypass flag, is not quarantined, and remains the de facto primary route while the bounded route is quarantined. | JSONL events and a final JSON object conforming to `schemas/result.schema.json`. | `scripts/exec-jail.sh` removes gate credentials; the orchestrator inspects the diff, and no machine assigns the “trusted” tier. |
 
 **Bounded tier and trusted tier describe how much ambiguity and blast radius the invocation is trusted with, not whether it bypasses permissions.** In the current registry, `EXEC_PRIMARY` is the intended bounded route but is unavailable because egress remains open and the jail has not been probed against it, while `EXEC_STRONG` is the trusted tier and the de facto primary. The aliases remain registry slots, and nothing mechanically assigns or verifies the tier vocabulary.
@@ -1004,7 +964,7 @@ Populate `04_Memory/` only with procedures that have already recurred three time
 
 ## 19. Known weaknesses and residual risk
 
-**Verified, and therefore no longer risks:** the agy route works · no metered credential is present in the environment · all three cloud routes are subscription-authenticated · `codex exec` supports schema-constrained output and sandboxing · rulesets are reachable on a free public repository · the vault path and structure are real.
+**Verified, and therefore no longer risks:** the bounded executor CLI can run headlessly without a permission bypass, given a working-directory grant and a tool allowlist naming real paths (the route itself remains quarantined — capability and availability are different findings, see §7.4) · no metered credential is present in the environment · all three cloud routes are subscription-authenticated · `codex exec` supports schema-constrained output and sandboxing · rulesets are reachable on a free public repository · the vault path and structure are real.
 
 **Still true:**
 
