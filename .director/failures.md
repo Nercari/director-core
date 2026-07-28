@@ -188,3 +188,44 @@ outcome the check exists to be able to report honestly.
 has either violated rule 6 or performed self-review while recording cross-vendor
 review. Which of those it was cannot be determined from the record, and that is
 itself the finding: the review tier leaves no evidence of which model reviewed.
+
+## External review, run director-core-review-mi7ww6, found 2026-07-28
+
+Not unit failures. Found by an external review run in an ephemeral Linux
+container with no registered executor route invocable there — `codex`, `agy`,
+`gh`, and `shellcheck` all absent. Independently verified rather than merged on
+report, per rule 2a; two items below are corrections to what the review itself
+claimed, found while reproducing it.
+
+| # | What | Class | Evidence |
+|---|---|---|---|
+| 14 | `scripts/conformance.py` had never passed | ninth instance of the unexercised-check pattern | Seven assertion strings held an em dash stored as UTF-8 then re-encoded as cp1252 — mojibake, introduced in `b63fac2` and `62ac0cd`. Scenarios 2, 3, 7, 8 failed on text, not behaviour. Fixed on the PR closing this review's item 1 |
+| 15 | CI ran neither `conformance.sh` nor the telemetry selfchecks | why defect 14 survived four merged PRs | `.github/workflows/gate.yml` runs CLAUDE.md line count, a Director-term grep, a model-name grep, shellcheck, schema metaschema, and `selftest.sh` — not conformance, not the ~2,900 lines of telemetry selfcheck code. Wiring this in is blocked on defect 14's fix landing first, or CI would fail on the very PR that adds the step |
+| 16 | Non-negotiable rule 2 had no enforcement point | unenforced rule | `block-dangerous-bash.sh` matched the executor-invocation command shape to enforce a timeout, but never checked for `exec-jail.sh`. A bare, unjailed `codex exec --sandbox workspace-write` with a timeout was permitted. Fixed in the PR closing this review's item 4 — scoped to `agy`/`codex` only, `claude` stays exempt since it is never an executor route |
+| 17 | `preflight.sh` reported route availability but never gated on it | report vs. gate | Every per-route outcome printed `pass`, even "unusable". If every executor route were quarantined, preflight still printed GREEN. Fixed in the PR closing this review's item 3: a per-alias usable counter, zero usable routes is now a hard `fail` |
+| 18 | `validate-result.sh` widened `route_used` when `check-jsonschema` was absent | contract violated for one field, honoured for others | The file's own stated contract ("a missing validator never widens what an executor can claim") was upheld for `status`, `branch`, and forbidden keys, but `route_used` was checked with an unanchored `grep` treating the value as a regex against `routes.yaml`'s contents. Fixed in the PR closing this review's item 5: literal match against the four-value enum the schema already defines |
+| 19 | README and the blueprint's inline registry copy were both stale | ninth and tenth instance of the same pattern as defects 6 and 15 | README claimed "Pre-Phase 0", exact script/hook counts, and blueprint revision 10.2 after 37+ merged PRs and blueprint's own header already at 10.3. Blueprint §7.2's inline registry snapshot had drifted from `.director/routes.yaml` on five fields, worst among them `EXEC_STRONG.quarantined` reading the opposite of true. Both corrected directly; the inline registry snapshot removed in favour of a pointer to the one authoritative file |
+
+**Two corrections to the review's own claims, found while reproducing it —
+recorded because the review is external input, not ground truth, and rule 2a
+applies to it exactly as it applies to an executor's self-report:**
+
+- The review's handoff said item 1's fix was "nothing committed, nothing
+  pushed... treat the diff as lost." It had in fact been pushed, at a commit
+  reachable from `origin/claude/director-core-review-mi7ww6`.
+- The review's own fix for defect 14, applied as pushed, does not pass on this
+  machine. `subprocess.run(..., text=True)` decodes with
+  `locale.getpreferredencoding()`, which is UTF-8 in the review's Linux
+  container and **cp1252 on Windows** — the platform AGENTS.md requires
+  `behavior_check` to run on. cp1252 silently mangles the same UTF-8 em dash the
+  fix repairs, with no decode error raised (cp1252 has a mapping for every
+  byte). Pinned to explicit `utf-8` decoding, `errors="replace"`, in the same
+  fix.
+
+**One coincidence worth recording so it is never mistaken for evidence:** on
+this Windows machine, testing defect 14 against a branch that still carried
+*both* the original mojibake *and* the original unpinned decode produced a
+false green. cp1252-decoding a real UTF-8 em dash yields the exact same
+three-codepoint garbage the mojibake literal already contains, so the two
+wrongs compare equal. A suite passing on Windows is not proof either half of
+this fix is present — only proof they are both present, or both absent.
