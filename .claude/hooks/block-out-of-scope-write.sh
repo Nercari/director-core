@@ -32,7 +32,7 @@ norm_path() {
   p="$(printf '%s' "$1" | tr '\\' '/')"
   case "$p" in
   [A-Za-z]:/*)
-    drive="$(printf '%s' "${p%%:*}" | tr 'A-Z' 'a-z')"
+    drive="$(printf '%s' "${p%%:*}" | tr '[:upper:]' '[:lower:]')"
     p="/$drive/${p#*:/}"
     ;;
   esac
