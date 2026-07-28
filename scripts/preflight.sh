@@ -135,6 +135,35 @@ else
       esac
     done <<< "$forbidden_models"
 
+    case "$alias" in
+      EXEC_PRIMARY | EXEC_STRONG | EXEC_LOCAL)
+        quarantined="$(echo "$block" | field quarantined)"
+        jail_verified="$(echo "$block" | field jail_verified)"
+        invoke="$(echo "$block" | field invoke)"
+        route_reason=""
+
+        case "$quarantined" in
+          true) route_reason="quarantined" ;;
+          false) ;;
+          *) route_reason="quarantine status ${quarantined:-missing}" ;;
+        esac
+        case "$jail_verified" in
+          true) ;;
+          false) route_reason="${route_reason:+$route_reason; }jail not verified" ;;
+          *) route_reason="${route_reason:+$route_reason; }jail verification status ${jail_verified:-missing}" ;;
+        esac
+        if [ -z "$invoke" ]; then
+          route_reason="${route_reason:+$route_reason; }invoke key absent"
+        fi
+
+        if [ -n "$route_reason" ]; then
+          pass "$alias route unusable: $route_reason"
+        else
+          pass "$alias route usable"
+        fi
+        ;;
+    esac
+
     if [ "$alias" = "EXEC_LOCAL" ]; then
       state="$(echo "$block" | field state)"
       case "$state" in
