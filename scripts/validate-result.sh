@@ -192,5 +192,9 @@ if [ "$FAIL" -gt 0 ]; then
   echo "REJECT — $FAIL check(s) failed. Nothing leaves this machine."
   exit 1
 fi
-echo "VALIDATED — safe to review, push, and open a pull request."
-exit 0
+if [ "$status" = "completed" ]; then
+  echo "VALIDATED — safe to review, push, and open a pull request."
+  exit 0
+fi
+echo "STOPPED: status=$status. Nothing is authorised to leave this machine."
+exit 2

@@ -84,3 +84,17 @@ Never call an estimate a measurement. Preflight estimates; only post-invocation 
 Nothing is added — no rule, script, hook, note, route, or section — for a failure mode that has not occurred at least twice in `.director/failures.md`.
 
 If a proposed rule can be a GitHub ruleset, a CI step, a hook, or a registry entry, it must not be prose. Prose is the weakest tier and this file is already competing with a large ambient instruction layer.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on `Nercari/director-core`, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical labels, unchanged (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
