@@ -22,6 +22,7 @@ from typing import Iterable, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 VALIDATOR_SOURCE = ROOT / "scripts" / "validate-result.sh"
+ROUTES_SOURCE = ROOT / ".director" / "routes.yaml"
 WORKTREE_SOURCE = ROOT / "scripts" / "worktree.sh"
 PREFLIGHT_SOURCE = ROOT / "scripts" / "preflight.sh"
 JAIL = ROOT / "scripts" / "exec-jail.sh"
@@ -77,8 +78,10 @@ class ValidatorFixture:
     def __enter__(self) -> "ValidatorFixture":
         try:
             self.root.mkdir()
+            (self.root / ".director").mkdir()
             (self.root / "scripts").mkdir()
             (self.root / "schemas").mkdir()
+            shutil.copy2(ROUTES_SOURCE, self.root / ".director" / "routes.yaml")
             shutil.copy2(VALIDATOR_SOURCE, self.validator)
             shutil.copy2(ROOT / "schemas" / "result.schema.json", self.root / "schemas" / "result.schema.json")
             if self.validator.read_bytes() != VALIDATOR_SOURCE.read_bytes():
@@ -178,6 +181,20 @@ def expect_validator_accept(fixture: ValidatorFixture, expected_reason: str) -> 
     return True, expected_reason
 
 
+def expect_validator_stopped(
+    fixture: ValidatorFixture, expected_exit_code: int, expected_line: str
+) -> tuple[bool, str]:
+    result = fixture.validate()
+    if result.returncode != expected_exit_code:
+        return (
+            False,
+            f"validator exited {result.returncode}, expected {expected_exit_code}: {result.output}",
+        )
+    if expected_line not in result.output:
+        return False, f"validator omitted expected line: {expected_line}"
+    return True, expected_line
+
+
 def scenario_one() -> tuple[bool, str]:
     try:
         with ValidatorFixture("uncommitted-reviewed-diff") as fixture:
@@ -217,6 +234,39 @@ def scenario_three() -> tuple[bool, str]:
                 fixture,
                 "required tests declared but none run, and no blocker reported â€” REJECT",
             )
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
+def scenario_stopped_terminal_outcomes() -> tuple[bool, str]:
+    try:
+        for status in ("blocked", "failed"):
+            with ValidatorFixture(f"stopped-{status}") as fixture:
+                fixture.modify_files({"allowed.txt": f"{status} result\n"})
+                fixture.write_packet(["allowed.txt"], [])
+                fixture.write_raw_result(
+                    {
+                        "status": status,
+                        "branch": f"task/stopped-{status}",
+                        "route_used": "EXEC_STRONG",
+                        "summary": "conformance fixture stopped",
+                        "files_changed": ["allowed.txt"],
+                        "tests_run": [],
+                        "tests_passed": [],
+                        "tests_failed": [],
+                        "unresolved_risks": [],
+                        "deviations_from_plan": [],
+                        "wall_time_seconds": 0,
+                    }
+                )
+                expected_line = (
+                    f"STOPPED: status={status}. "
+                    "Nothing is authorised to leave this machine."
+                )
+                passed, reason = expect_validator_stopped(fixture, 2, expected_line)
+                if not passed:
+                    return False, f"{status}: {reason}"
+        return True, "blocked and failed produce distinct stopped outcomes with exit 2"
     except Exception as error:
         return False, f"fixture could not be built or exercised: {error}"
 
@@ -564,6 +614,7 @@ def main() -> int:
         scenario_defect_three_result_invariants(),
         scenario_defect_four_forbidden_model(),
         scenario_defect_five_future_verification(),
+        scenario_stopped_terminal_outcomes(),
     )
     all_passed = True
     for index, (passed, reason) in enumerate(outcomes, 1):
