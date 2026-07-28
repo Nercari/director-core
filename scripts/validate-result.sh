@@ -150,19 +150,21 @@ else
 fi
 
 if [ -n "$route" ] && [ "$route" != "null" ]; then
-  if grep -q "$route" "$ROOT/.director/routes.yaml" 2>/dev/null \
-    || [ "$route" = "DIRECT" ]; then
-    pass "route_used=$route is authorised"
-  else
-    fail "route_used=$route is not in routes.yaml — REJECT"
-  fi
+  case "$route" in
+    EXEC_PRIMARY | EXEC_STRONG | EXEC_LOCAL | DIRECT)
+      pass "route_used=$route is authorised"
+      ;;
+    *)
+      fail "route_used=$route is not allowed — REJECT"
+      ;;
+  esac
 fi
 
 # Tests are re-run here, independently. A self-reported pass is not evidence.
-skipped="$(jq -r '[.tests_run[]?] | length' "$RESULT")"
+tests_declared_run="$(jq -r '[.tests_run[]?] | length' "$RESULT")"
 declared="$(sed -n '/^required_tests:/,/^[a-z_]*:/p' "$PACKET" 2>/dev/null | sed -n 's/^ *- *//p')"
 if [ -n "$declared" ]; then
-  if [ "$skipped" -eq 0 ]; then
+  if [ "$tests_declared_run" -eq 0 ]; then
     blocker="$(jq -r '.unresolved_risks | length' "$RESULT")"
     if [ "$blocker" -eq 0 ]; then
       fail "required tests declared but none run, and no blocker reported — REJECT"

@@ -352,6 +352,38 @@ def scenario_defect_three_result_invariants() -> tuple[bool, str]:
         return False, f"fixture could not be built or exercised: {error}"
 
 
+def scenario_result_route_used_closed_enum() -> tuple[bool, str]:
+    try:
+        for unit, route, accepted in (
+            ("invalid-route-used", "tool", False),
+            ("valid-exec-strong-route", "EXEC_STRONG", True),
+        ):
+            with ValidatorFixture(unit) as fixture:
+                fixture.modify_files({"allowed.txt": "route fixture\n"})
+                fixture.write_packet(["allowed.txt"], [])
+                fixture.write_raw_result(
+                    {
+                        "status": "completed",
+                        "branch": f"task/{unit}",
+                        "route_used": route,
+                        "summary": "conformance fixture",
+                    }
+                )
+                if accepted:
+                    passed, reason = expect_validator_accept(
+                        fixture, f"route_used={route} is authorised"
+                    )
+                else:
+                    passed, reason = expect_validator_reject(
+                        fixture, f"route_used={route} is not allowed"
+                    )
+                if not passed:
+                    return False, f"{unit}: {reason}"
+        return True, "route_used rejects tool and accepts EXEC_STRONG"
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
 def preflight_fixture_routes(primary_block: str) -> str:
     return f"""routes:
   ORCH_PRIMARY:
@@ -660,6 +692,7 @@ def main() -> int:
         scenario_defect_one_lock_owner(),
         scenario_defect_two_missing_base_commit(),
         scenario_defect_three_result_invariants(),
+        scenario_result_route_used_closed_enum(),
         scenario_defect_four_forbidden_model(),
         scenario_defect_five_future_verification(),
         scenario_stopped_terminal_outcomes(),
