@@ -51,21 +51,6 @@ jobs:
           pipx install check-jsonschema
           check-jsonschema --check-metaschema schemas/*.json
 
-      - name: TEMP diagnose scenario 5 auth source
-        run: |
-          echo "--- env token vars ---"
-          env | grep -iE 'token|gh_' || echo "none"
-          echo "--- git config extraheader ---"
-          git config --get-all "http.https://github.com/.extraheader" 2>&1 || echo "none"
-          echo "--- unjailed gh auth status ---"
-          gh auth status 2>&1 || true
-          echo "--- jailed gh auth status ---"
-          bash scripts/exec-jail.sh gh auth status 2>&1 || true
-          echo "--- jailed gh api user (raw) ---"
-          bash scripts/exec-jail.sh gh api user 2>&1 || true
-          echo "--- jailed env dump ---"
-          bash scripts/exec-jail.sh env 2>&1 | grep -iE 'token|gh_' || echo "none"
-
       - name: conformance
         run: sh scripts/conformance.sh
 

@@ -670,6 +670,12 @@ def authentication_refusal(result: Command) -> bool:
         "no credentials",
         "permission denied",
         "denied",
+        # gh's own GitHub Actions detection: inside a workflow it refuses with
+        # this message instead of any of the markers above, even though it is
+        # exactly as much a refusal. Confirmed live on ubuntu-latest: this
+        # scenario failed there with gh genuinely unauthenticated, jailed and
+        # unjailed alike, purely because this marker was missing.
+        "set the gh_token environment variable",
     )
     return result.returncode != 0 and any(marker in lowered for marker in markers)
 
