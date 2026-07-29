@@ -49,6 +49,16 @@ jobs:
           pipx install check-jsonschema
           check-jsonschema --check-metaschema schemas/*.json
 
+      - name: conformance
+        run: sh scripts/conformance.sh
+
+      - name: telemetry selfchecks
+        run: |
+          set -e
+          for f in scripts/telemetry/*_selfcheck.sh; do
+            sh "$f"
+          done
+
       - name: hooks are executable and refuse what they must
         run: |
           chmod +x .claude/hooks/*.sh
