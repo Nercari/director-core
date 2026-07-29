@@ -131,6 +131,7 @@ expect_block "API key in command"     block-dangerous-bash.sh "$(bash_cmd 'OPENA
 expect_block "agent with no timeout"  block-dangerous-bash.sh "$(bash_cmd 'agy -p "do the thing"')"
 expect_block "agy without jail"       block-dangerous-bash.sh "$(bash_cmd 'timeout 900 agy -p --print-timeout 15m "do it"')"
 expect_block "codex without jail"     block-dangerous-bash.sh "$(bash_cmd 'timeout 900 codex exec --sandbox workspace-write "do it"')"
+expect_block "claude bare"             block-dangerous-bash.sh "$(bash_cmd 'timeout 900 claude --bare -p "do it"')"
 
 echo
 echo "block-dangerous-bash — must permit"
@@ -141,6 +142,9 @@ expect_allow "codex through jail"     block-dangerous-bash.sh "$(bash_cmd 'timeo
 expect_allow "claude without jail"    block-dangerous-bash.sh "$(bash_cmd 'timeout 900 claude -p "do it"')"
 expect_allow "cheap introspection"    block-dangerous-bash.sh "$(bash_cmd 'agy models')"
 expect_allow "ordinary status"        block-dangerous-bash.sh "$(bash_cmd 'git status --short')"
+expect_allow "executor prose in commit message" block-dangerous-bash.sh \
+  '{"tool_input":{"command":"git commit -m \"ran codex exec through exec-jail.sh with a timeout\"","description":"Record the completed change"}}'
+expect_allow "ordinary git bare repo" block-dangerous-bash.sh "$(bash_cmd 'git init --bare /tmp/x.git')"
 
 echo
 echo "block-secret-read — must refuse"
