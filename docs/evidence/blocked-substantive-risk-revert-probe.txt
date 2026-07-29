@@ -1,3 +1,13 @@
-=== suite with the validator change REVERTED ===
-FAIL scenario 13: absent: validator exited 2, expected 1
+# Revert probe — ticket 21
+# Date:    2026-07-29
+# Command: git checkout main -- scripts/validate-result.sh && bash scripts/conformance.sh
+#          (against main, NOT 'git checkout --'. Once the change is committed,
+#           checkout from the index restores the change and the probe reports a
+#           false green. Observed while recording this file.)
+# Purpose: show the new cases fail without the validator change, so the
+#          scenario is proven load bearing rather than decorative.
+# All three empty forms are exercised before the scenario reports, so each is
+# demonstrated failing rather than inferred from the first.
+
+FAIL scenario 13: absent: validator exited 2, expected 1; empty-string: validator exited 2, expected 1; whitespace-only: validator exited 2, expected 1
 CONFORMANCE FAILED

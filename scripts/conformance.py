@@ -316,6 +316,10 @@ def scenario_blocked_states_what_it_hit() -> tuple[bool, str]:
         }
 
     try:
+        # Every empty form is exercised before reporting. Returning on the
+        # first failure would evidence only one of the three under a revert
+        # probe, leaving the other two inferred rather than demonstrated.
+        empty_failures = []
         for label, risks in empty_cases:
             unit = f"blocked-risks-{label}"
             with ValidatorFixture(unit) as fixture:
@@ -324,7 +328,9 @@ def scenario_blocked_states_what_it_hit() -> tuple[bool, str]:
                 fixture.write_raw_result(raw(unit, "blocked", risks))
                 passed, reason = expect_validator_reject(fixture, reject_line)
                 if not passed:
-                    return False, f"{label}: {reason}"
+                    empty_failures.append(f"{label}: {reason}")
+        if empty_failures:
+            return False, "; ".join(empty_failures)
 
         # A blocked result that does say what it hit keeps the terminal
         # treatment: stopped with exit 2, neither rejected nor validated.

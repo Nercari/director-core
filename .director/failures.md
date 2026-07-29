@@ -275,3 +275,38 @@ commit message that merely described an executor invocation. The hook's own
 header declares this weakness rather than hiding it; recorded here as the
 second occurrence, which is the bar §13.3 sets before anything may be added to
 address it.
+
+## A blocked result could say nothing, found 2026-07-29
+
+Latent, not observed in a live run. Found by review while implementing #21 and
+recorded here because a gate rule was added on the strength of it, and the bar
+for adding anything is that the ledger carries the record.
+
+`validate-result.sh` accepted `status: blocked` with `unresolved_risks` absent
+entirely. The operator learned that work halted and nothing about why. Stopping
+was a valid way to say nothing.
+
+The near miss is that the obvious fix is also wrong. A length check on
+`unresolved_risks` passes on `[""]` and on `["   "]`, because the schema admits
+the empty string — so a placeholder satisfies the obligation while carrying no
+information, and the gate reports a blocker that does not exist. The check has
+to be on content, not on count. Fixed by rejecting `blocked` unless at least one
+entry has something left once whitespace is stripped.
+
+**Third instance of the count-versus-content pattern in this file.** Defect 18
+checked `route_used` with an unanchored grep against the registry's contents
+rather than against the closed enum, and the same function's "tests skipped with
+a reported blocker" branch still asks only for `.unresolved_risks | length`, so
+`[""]` satisfies it today for `failed` and `completed`. That branch is
+deliberately out of scope for #21 and is left standing rather than widened
+without a decision. Recorded so the next person finds it on purpose rather than
+by accident.
+
+**A ticket criterion turned out to be unsatisfiable, which is its own record.**
+#21 asked that existing conformance fixtures be left unmodified. One of them —
+`scenario_stopped_terminal_outcomes` — drove its blocked arm with an empty
+`unresolved_risks` list, which is precisely the input the ticket makes invalid.
+A fixture encoding the behaviour a ticket changes cannot also be preserved by
+it. The fixture's purpose (asserting terminal treatment) was kept and its data
+corrected. Worth noting for future tickets: "existing tests pass unchanged" is
+a criterion that quietly assumes the change is additive.
