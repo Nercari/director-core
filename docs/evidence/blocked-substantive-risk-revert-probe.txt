@@ -2,12 +2,22 @@
 # Date:    2026-07-29
 # Command: git checkout main -- scripts/validate-result.sh && bash scripts/conformance.sh
 #          (against main, NOT 'git checkout --'. Once the change is committed,
-#           checkout from the index restores the change and the probe reports a
-#           false green. Observed while recording this file.)
+#           checkout from the index restores it and the probe reports a false
+#           green. Observed while recording this file.)
 # Purpose: show the new cases fail without the validator change, so the
-#          scenario is proven load bearing rather than decorative.
-# All three empty forms are exercised before the scenario reports, so each is
+#          scenario is load bearing rather than decorative.
+# All 11 empty forms are exercised before the scenario reports, so each is
 # demonstrated failing rather than inferred from the first.
 
-FAIL scenario 13: absent: validator exited 2, expected 1; empty-string: validator exited 2, expected 1; whitespace-only: validator exited 2, expected 1
+FAIL scenario 13: key-omitted: validator exited 2, expected 1
+ null: validator exited 2, expected 1
+ empty-list: validator exited 2, expected 1
+ number-entry: validator exited 2, expected 1
+ nested-array: validator exited 2, expected 1
+ null-entry: validator exited 2, expected 1
+ empty-string: validator exited 2, expected 1
+ whitespace-only: validator exited 2, expected 1
+ zero-width: validator exited 2, expected 1
+ byte-order-mark: validator exited 2, expected 1
+ non-breaking-space: validator exited 2, expected 1
 CONFORMANCE FAILED

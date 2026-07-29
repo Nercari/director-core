@@ -294,14 +294,29 @@ def scenario_blocked_states_what_it_hit() -> tuple[bool, str]:
     information. Stopping must not become a way to say nothing.
     """
     reject_line = "status=blocked with no substantive unresolved_risks entry — REJECT"
+    # A sentinel distinct from every JSON value, so "the key is absent" is a
+    # case in its own right rather than a synonym for the empty list.
+    omitted = object()
     empty_cases = (
-        ("absent", []),
+        ("key-omitted", omitted),
+        ("null", None),
+        ("empty-list", []),
+        # Not strings. The schema rejects these, so the gate only has to avoid
+        # counting them as a stated risk.
+        ("number-entry", [42]),
+        ("nested-array", [["a risk"]]),
+        ("null-entry", [None]),
         ("empty-string", [""]),
         ("whitespace-only", ["   "]),
+        # Renders as nothing but is not matched by \s. A placeholder that
+        # looks empty must not satisfy an obligation to state something.
+        ("zero-width", ["​"]),
+        ("byte-order-mark", ["﻿"]),
+        ("non-breaking-space", [" "]),
     )
 
-    def raw(unit: str, status: str, risks: list[str]) -> dict:
-        return {
+    def raw(unit: str, status: str, risks: object) -> dict:
+        body = {
             "status": status,
             "branch": f"task/{unit}",
             "route_used": "EXEC_STRONG",
@@ -314,11 +329,14 @@ def scenario_blocked_states_what_it_hit() -> tuple[bool, str]:
             "deviations_from_plan": [],
             "wall_time_seconds": 0,
         }
+        if risks is omitted:
+            del body["unresolved_risks"]
+        return body
 
     try:
         # Every empty form is exercised before reporting. Returning on the
-        # first failure would evidence only one of the three under a revert
-        # probe, leaving the other two inferred rather than demonstrated.
+        # first failure would evidence only one form under a revert probe,
+        # leaving the rest inferred rather than demonstrated.
         empty_failures = []
         for label, risks in empty_cases:
             unit = f"blocked-risks-{label}"

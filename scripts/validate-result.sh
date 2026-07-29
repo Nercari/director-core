@@ -87,9 +87,12 @@ fi
 # `failed` is deliberately outside this obligation. Whether it should carry the
 # same one is a separate question and is not decided here.
 if [ "$status" = "blocked" ]; then
+  # \s alone leaves a hole: a zero-width space or a byte-order mark is not
+  # matched by it, so an entry made of one counts as a stated risk while
+  # rendering as nothing. Cf (format) and Zs (space separator) close it.
   substantive="$(jq '[.unresolved_risks[]?
                       | select(type == "string")
-                      | select((gsub("\\s"; "")) != "")]
+                      | select((gsub("[\\s\\p{Cf}\\p{Zs}]"; "")) != "")]
                      | length' "$RESULT" 2>/dev/null)"
   if [ "${substantive:-0}" -eq 0 ]; then
     fail "status=blocked with no substantive unresolved_risks entry — REJECT"
