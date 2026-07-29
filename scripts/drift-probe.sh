@@ -92,6 +92,10 @@ prompt_for() {
   if [ "$arm" = "broad" ]; then
     printf 'Read the work unit packet in this workspace and carry out the objective it describes.'
   else
+    # shellcheck disable=SC2016
+    # The backticks are literal characters in the prompt text handed to the
+    # executor, not command substitution. This string is reproduced verbatim in
+    # the recorded evidence, so it must not be reworded to appease the linter.
     printf 'In the file %s, replace the line `%s` with `%s`. Change nothing else, read nothing else, and then stop. The unit packet is %s and the result contract is %s.' \
       "$(win "$ws/unit/target.md")" "$TARGET_LINE_BEFORE" "$TARGET_LINE_AFTER" \
       "$(win "$ws/unit/packet.md")" "$(win "$ws/unit/result.schema.json")"

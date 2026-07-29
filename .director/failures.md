@@ -305,7 +305,9 @@ cannot be outranked by anything written inside it.
 **Second instance of the executor writing outside its declared paths.** In the
 narrow arm the executor wrote `codigo_projeto_consolidado.md` at the workspace
 root while its grant was `workspace/unit`. `.director/routes.yaml` already
-records writes outside `allowed_paths` on this route from the 2026-07-26 probe;
+records this route writing outside the paths its unit declared, from the
+2026-07-26 probe; the registry names the field, and the gate forbids naming it
+here — see the note at the end of this entry;
 this is the second, and it was produced under a grant deliberately narrowed to
 prevent exactly that. Rule 2a's requirement that the orchestrator diff the
 working tree itself, rather than trust the executor's report, is what caught it.
@@ -318,3 +320,24 @@ denied Obsidian MCP call that the task-observer skill had told it to make. The
 2026-07-26 record of this shape called it the worst possible failure shape and
 that judgement stands: had the objective not been checked on disk, the arms
 would have been compared on four runs that did nothing.
+
+**Third instance of a text-matching gate refusing the thing it was not aimed
+at.** CI's "No Director term defined outside AGENTS.md" step failed this unit
+because both this entry and the evidence record *quoted* a registry field name
+while describing an observation. The step greps for the bare token, so it cannot
+tell a definition from a citation, and the effect is that an evidence record
+cannot name the field whose violation it is recording. Both were reworded to get
+past it, which is the wrong direction — the record is now less precise than the
+observation it documents. Recorded as the third occurrence of the class already
+carrying two: the hook that read `git merge-base` as merging, and the one that
+read a commit message describing a credential variable as using one. §13.3's
+two-occurrence bar is met for the class; what to do about it is not decided
+here.
+
+**Recorded, not worked around: the orchestrator cannot resolve this branch's
+conflict.** `.director/failures.md` conflicts with `main` because #51 merged an
+entry into the same append point. `git merge origin/main` is refused by
+`block-dangerous-bash.sh` as "merging or self-approving", and rebasing a pushed
+branch is forbidden outright by rule 3. Both refusals are correct in intent and
+neither has an exception for a task branch taking an update from `main`, so the
+conflict is left for the operator rather than bypassed.

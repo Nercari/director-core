@@ -91,7 +91,7 @@ is the task-observer skill's own artefact, written into the unit's workspace.
 **1. The narrow grant did not confine writes.** `codigo_projeto_consolidado.md`
 in narrow 1 was written at the *workspace root* while the grant was
 `workspace/unit`. The executor wrote outside its `--add-dir` grant. This
-independently reproduces the "writes outside `allowed_paths`" note already
+independently reproduces the writing-outside-its-declared-paths note already
 recorded against this route in `.director/routes.yaml`, and it is a reason the
 route's quarantine should not be lifted on a grant argument alone.
 
