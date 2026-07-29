@@ -316,3 +316,43 @@ A fixture encoding the behaviour a ticket changes cannot also be preserved by
 it. The fixture's purpose (asserting terminal treatment) was kept and its data
 corrected. Worth noting for future tickets: "existing tests pass unchanged" is
 a criterion that quietly assumes the change is additive.
+
+---
+
+## 2026-07-29 — the handoff gate had been off on the only machine where cycles end
+
+Rule 7 says no cycle ends without a handoff that validates against the schema.
+`require-handoff.sh` only validated when `check-jsonschema` was installed, and it
+is not installed on the operator's machine. Everything after the JSON parse was
+skipped in silence, so `{}` ended a cycle and all seven required fields were
+unenforced in practice. Fixed under
+[#48](https://github.com/Nercari/director-core/issues/48).
+
+**Second instance of a gate that stops checking when a tool is missing.** The
+first was `validate-result.sh`, which handled it correctly by announcing the
+degradation and enforcing the gate-critical invariants directly. That correct
+pattern existed in a sibling file for three days and was not copied here, which
+is the more useful half of this record: the fix was already written down.
+
+**The silence was the defect, not the missing tool.** The fix does not hard-block
+on the absent validator. Making the gate's correctness depend on an install step
+relocates the fragility rather than removing it, and would have stopped every
+cycle on this machine including the one shipping the fix.
+
+**Found while fixing it, and worth more than the fix:** every handoff this
+orchestrator has published is schema-invalid. The contract requires
+`decisions_taken` to be an array of objects each carrying a `decision` from a
+closed enumeration and a `rationale`, and `open_pull_requests` to be an array of
+strings. Every handoff written to date used bare prose strings for the former and
+numbers for the latter. Nothing ever objected, because the check that would have
+objected was the one that had been skipping. A gate nobody exercised is
+indistinguishable from a gate nobody has — third instance of that sentence in
+this file.
+
+**Windows portability defect, caught by the behavior check on its first run.**
+`jq` here terminates output lines with CRLF, so field names read out of the
+schema arrived with a trailing carriage return and matched nothing. The gate
+refused a valid handoff for a missing `published_at` that was present. Had the
+behavior check only covered refusals, this would have shipped as a gate that
+refuses everything — which reads as strictness rather than as breakage. Second
+instance of a CRLF defect in a shell gate on this platform.

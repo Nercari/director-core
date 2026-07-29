@@ -1,0 +1,42 @@
+# Revert probe — handoff validation degradation (#48)
+#
+# The fix in .claude/hooks/require-handoff.sh was reverted to the pre-change
+# version and the behavior check re-run, so the check is demonstrated to enforce
+# rather than assumed to. Verbatim output follows.
+#
+# $ git show HEAD:.claude/hooks/require-handoff.sh > .claude/hooks/require-handoff.sh
+# $ bash .claude/hooks/handoff-degradation-demo.sh
+
+=== empty object
+  verdict      : ALLOWED (expected DENIED)
+=== missing next_action
+  verdict      : ALLOWED (expected DENIED)
+=== missing repository_state.main_commit
+  verdict      : ALLOWED (expected DENIED)
+=== objective present but empty
+  verdict      : ALLOWED (expected DENIED)
+=== capacity_state outside the enumeration
+  verdict      : ALLOWED (expected DENIED)
+=== no handoff file at all
+  verdict      : DENIED (expected DENIED)
+=== not valid JSON
+  verdict      : DENIED (expected DENIED)
+=== no validator and no schema either
+  verdict      : ALLOWED (expected DENIED)
+=== valid handoff
+  verdict      : ALLOWED (expected ALLOWED)
+=== valid handoff, validator accepts
+  verdict      : ALLOWED (expected ALLOWED)
+=== validator refuses
+  verdict      : DENIED (expected DENIED)
+=== empty object, validator refuses
+  verdict      : DENIED (expected DENIED)
+=== no active worktree, no handoff
+  verdict      : ALLOWED (expected ALLOWED)
+=== no active worktree, junk handoff
+  verdict      : ALLOWED (expected ALLOWED)
+=== unknown field, validator absent
+  verdict      : ALLOWED (expected ALLOWED)
+=== unknown field, validator present
+  verdict      : DENIED (expected DENIED)
+handoff degradation demo FAILED: 6 wrong verdict(s)
