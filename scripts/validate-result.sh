@@ -77,6 +77,27 @@ elif [ "$status" = "blocked" ] || [ "$status" = "failed" ]; then
   pass "status=$status"
 fi
 
+# Stopping stops being a valid way to say nothing.
+#
+# A blocked result must state what it hit. Counting entries is not enough: the
+# schema admits the empty string, so a length-only check passes on [""] and on
+# ["   "] — a placeholder satisfies the obligation while carrying no
+# information. The check is on content, not on count.
+#
+# `failed` is deliberately outside this obligation. Whether it should carry the
+# same one is a separate question and is not decided here.
+if [ "$status" = "blocked" ]; then
+  substantive="$(jq '[.unresolved_risks[]?
+                      | select(type == "string")
+                      | select((gsub("\\s"; "")) != "")]
+                     | length' "$RESULT" 2>/dev/null)"
+  if [ "${substantive:-0}" -eq 0 ]; then
+    fail "status=blocked with no substantive unresolved_risks entry — REJECT"
+  else
+    pass "status=blocked names $substantive substantive unresolved risk(s)"
+  fi
+fi
+
 # main must be untouched. The executor works on a branch, in a worktree, only.
 main_before="$(sed -n 's/^base_commit: *//p' "$RUN/worktree.yaml" 2>/dev/null)"
 main_now="$(git -C "$ROOT" rev-parse main 2>/dev/null)"

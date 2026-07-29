@@ -245,6 +245,15 @@ def scenario_three() -> tuple[bool, str]:
 
 
 def scenario_stopped_terminal_outcomes() -> tuple[bool, str]:
+    # The blocked arm carries a substantive unresolved risk because a blocked
+    # result that names nothing is now rejected rather than stopped — see
+    # scenario_blocked_states_what_it_hit. This fixture exists to assert the
+    # terminal treatment, not the absence of that obligation, so it states a
+    # risk rather than asserting the old behaviour.
+    risks_for = {
+        "blocked": ["the declared fixture path does not exist"],
+        "failed": [],
+    }
     try:
         for status in ("blocked", "failed"):
             with ValidatorFixture(f"stopped-{status}") as fixture:
@@ -260,7 +269,7 @@ def scenario_stopped_terminal_outcomes() -> tuple[bool, str]:
                         "tests_run": [],
                         "tests_passed": [],
                         "tests_failed": [],
-                        "unresolved_risks": [],
+                        "unresolved_risks": risks_for[status],
                         "deviations_from_plan": [],
                         "wall_time_seconds": 0,
                     }
@@ -273,6 +282,98 @@ def scenario_stopped_terminal_outcomes() -> tuple[bool, str]:
                 if not passed:
                     return False, f"{status}: {reason}"
         return True, "blocked and failed produce distinct stopped outcomes with exit 2"
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
+def scenario_blocked_states_what_it_hit() -> tuple[bool, str]:
+    """A blocked result must say what it hit, in content and not merely in count.
+
+    The schema admits the empty string, so a length-only check passes on [""]
+    and on ["   "]: a placeholder satisfies the requirement while carrying no
+    information. Stopping must not become a way to say nothing.
+    """
+    reject_line = "status=blocked with no substantive unresolved_risks entry — REJECT"
+    empty_cases = (
+        ("absent", []),
+        ("empty-string", [""]),
+        ("whitespace-only", ["   "]),
+    )
+
+    def raw(unit: str, status: str, risks: list[str]) -> dict:
+        return {
+            "status": status,
+            "branch": f"task/{unit}",
+            "route_used": "EXEC_STRONG",
+            "summary": f"conformance fixture {status}",
+            "files_changed": ["allowed.txt"],
+            "tests_run": [],
+            "tests_passed": [],
+            "tests_failed": [],
+            "unresolved_risks": risks,
+            "deviations_from_plan": [],
+            "wall_time_seconds": 0,
+        }
+
+    try:
+        for label, risks in empty_cases:
+            unit = f"blocked-risks-{label}"
+            with ValidatorFixture(unit) as fixture:
+                fixture.modify_files({"allowed.txt": f"{label}\n"})
+                fixture.write_packet(["allowed.txt"], [])
+                fixture.write_raw_result(raw(unit, "blocked", risks))
+                passed, reason = expect_validator_reject(fixture, reject_line)
+                if not passed:
+                    return False, f"{label}: {reason}"
+
+        # A blocked result that does say what it hit keeps the terminal
+        # treatment: stopped with exit 2, neither rejected nor validated.
+        # Leading and trailing whitespace around real content must not count
+        # against it — the check is on substance, not on formatting.
+        unit = "blocked-risks-substantive"
+        with ValidatorFixture(unit) as fixture:
+            fixture.modify_files({"allowed.txt": "substantive\n"})
+            fixture.write_packet(["allowed.txt"], [])
+            fixture.write_raw_result(
+                raw(unit, "blocked", ["  the declared fixture path does not exist  "])
+            )
+            passed, reason = expect_validator_stopped(
+                fixture,
+                2,
+                "STOPPED: status=blocked. Nothing is authorised to leave this machine.",
+            )
+            if not passed:
+                return False, f"substantive: {reason}"
+
+        # failed is deliberately out of scope for this obligation. An empty
+        # list must still stop rather than reject, or the change has widened
+        # past its ticket.
+        unit = "failed-risks-empty"
+        with ValidatorFixture(unit) as fixture:
+            fixture.modify_files({"allowed.txt": "failed\n"})
+            fixture.write_packet(["allowed.txt"], [])
+            fixture.write_raw_result(raw(unit, "failed", []))
+            passed, reason = expect_validator_stopped(
+                fixture,
+                2,
+                "STOPPED: status=failed. Nothing is authorised to leave this machine.",
+            )
+            if not passed:
+                return False, f"failed unaffected: {reason}"
+
+        # completed is likewise untouched.
+        unit = "completed-risks-empty"
+        with ValidatorFixture(unit) as fixture:
+            fixture.modify_files({"allowed.txt": "completed\n"})
+            fixture.write_packet(["allowed.txt"], [])
+            fixture.write_raw_result(raw(unit, "completed", []))
+            passed, reason = expect_validator_accept(
+                fixture, "VALIDATED — safe to review, push, and open a pull request."
+            )
+            if not passed:
+                return False, f"completed unaffected: {reason}"
+
+        return True, "blocked must name a substantive risk; failed and completed unaffected"
     except Exception as error:
         return False, f"fixture could not be built or exercised: {error}"
 
@@ -776,6 +877,7 @@ def main() -> int:
         scenario_defect_four_forbidden_model(),
         scenario_defect_five_future_verification(),
         scenario_stopped_terminal_outcomes(),
+        scenario_blocked_states_what_it_hit(),
         scenario_route_availability(),
         scenario_route_availability_gate(),
     )

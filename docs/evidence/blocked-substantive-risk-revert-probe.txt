@@ -1,0 +1,3 @@
+=== suite with the validator change REVERTED ===
+FAIL scenario 13: absent: validator exited 2, expected 1
+CONFORMANCE FAILED
