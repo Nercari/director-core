@@ -63,16 +63,26 @@ if printf '%s' "$cmd" | grep -qE '[A-Z0-9_]*API_KEY'; then
   deny "command carries a *_API_KEY. Subscription and OAuth auth only (§14)."
 fi
 
+# `claude --bare` requires ANTHROPIC_API_KEY and disables project discovery.
+if printf '%s' "$cmd" | grep -qE '(^|[;&|()[:space:]])claude([[:space:]]|$)' \
+  && printf '%s' "$cmd" | grep -qE '(^|[[:space:]])--bare([[:space:]]|$)'; then
+  deny "claude --bare violates AGENTS.md rule 5 and disables hook and settings discovery."
+fi
+
 # --- unbounded agent calls ---------------------------------------------------
 # A headless agent with no timeout is an open-ended spend.
-if printf '%s' "$cmd" | grep -qE '(^|[^a-z-])(agy|codex|claude)([[:space:]]|$)'; then
-  case "$cmd" in
+# Match command structure here, not prose carried in quoted arguments. This is
+# deliberately only quoted-span removal, not shell parsing.
+match_cmd="$(printf '%s' "$cmd" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g")"
+
+if printf '%s' "$match_cmd" | grep -qE '(^|[;&|()[:space:]])(agy|codex|claude)([[:space:]]|$)'; then
+  case "$match_cmd" in
   *"--version"* | *"--help"* | *"login status"* | *"models"*) : ;;  # cheap introspection
   *)
-    printf '%s' "$cmd" | grep -q 'timeout' \
+    printf '%s' "$match_cmd" | grep -q 'timeout' \
       || deny "headless agent call with no timeout (§15.1)."
-    if printf '%s' "$cmd" | grep -qE '(^|[^a-z-])(agy|codex)([[:space:]]|$)'; then
-      case "$cmd" in
+    if printf '%s' "$match_cmd" | grep -qE '(^|[;&|()[:space:]])(agy|codex)([[:space:]]|$)'; then
+      case "$match_cmd" in
       *"exec-jail.sh"*) : ;;
       *) deny "headless executor call missing exec-jail.sh (AGENTS.md rule 2)." ;;
       esac

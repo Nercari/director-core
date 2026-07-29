@@ -189,6 +189,12 @@ has either violated rule 6 or performed self-review while recording cross-vendor
 review. Which of those it was cannot be determined from the record, and that is
 itself the finding: the review tier leaves no evidence of which model reviewed.
 
+## Hook command matching correction, found 2026-07-29
+
+| # | What | Class | Evidence |
+|---|---|---|---|
+| 20 | Non-negotiable rule 5 had no enforcement point | unenforced rule | `timeout 900 claude --bare -p "do it"` was permitted even though `--bare` requires `ANTHROPIC_API_KEY` and disables settings, hooks, skills, and `CLAUDE.md` discovery. This is another instance of defect 16's unenforced-rule class |
+
 ## External review, run director-core-review-mi7ww6, found 2026-07-28
 
 Not unit failures. Found by an external review run in an ephemeral Linux
