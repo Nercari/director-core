@@ -275,3 +275,46 @@ commit message that merely described an executor invocation. The hook's own
 header declares this weakness rather than hiding it; recorded here as the
 second occurrence, which is the bar §13.3 sets before anything may be added to
 address it.
+
+---
+
+## 2026-07-29 — the executor's drift comes from an instruction layer no grant can reach
+
+Recorded from the measurement in
+[`docs/evidence/executor-drift-2026-07-29.md`](../docs/evidence/executor-drift-2026-07-29.md),
+run under [#29](https://github.com/Nercari/director-core/issues/29). No
+mitigation is implemented; that ticket forbids one.
+
+Four runs of `EXEC_PRIMARY` on a trivial one-line objective, two with a prose
+prompt and a workspace-wide grant, two with a single atomic step and a grant
+narrowed to the unit directory. In **four of four**, before touching the
+objective, the executor read
+`C:\Users\dorot\.gemini\config\skills\task-observer\SKILL.md` and in some runs
+`using-superpowers` and `ponytail` beside it. Narrowing the prompt and the grant
+halved the turns spent before the objective was touched — 7 and 6 became 3 and 3
+— and did not affect the skill read at all.
+
+**Why the strongest available lever cannot touch it:** that directory lives in
+the executor's own `HOME`, outside every workspace. `--add-dir` cannot reach it
+in either direction, so no prompt and no grant can cause or prevent the read.
+The instruction the orchestrator has been competing with was never in either of
+the two files the executor is documented to read. §13.3's "prose is the weakest
+tier" has a floor under it: an instruction loaded from outside the repository
+cannot be outranked by anything written inside it.
+
+**Second instance of the executor writing outside its declared paths.** In the
+narrow arm the executor wrote `codigo_projeto_consolidado.md` at the workspace
+root while its grant was `workspace/unit`. `.director/routes.yaml` already
+records writes outside `allowed_paths` on this route from the 2026-07-26 probe;
+this is the second, and it was produced under a grant deliberately narrowed to
+prevent exactly that. Rule 2a's requirement that the orchestrator diff the
+working tree itself, rather than trust the executor's report, is what caught it.
+
+**Third instance of silence that looks like success.** A discarded first attempt
+placed the probe workspaces inside this repository, where the executor's own
+permission table denies writes irrespective of `--add-dir`. Every run was
+refused, returned an empty response, and exited `status: SUCCESS`. One died on a
+denied Obsidian MCP call that the task-observer skill had told it to make. The
+2026-07-26 record of this shape called it the worst possible failure shape and
+that judgement stands: had the objective not been checked on disk, the arms
+would have been compared on four runs that did nothing.
