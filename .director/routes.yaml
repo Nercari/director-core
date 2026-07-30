@@ -42,6 +42,17 @@ routes:
     jail_verified: false                 # exec-jail was proven against codex, NOT against agy
     enforcement: "scripts/exec-jail.sh empties GH_CONFIG_DIR and nulls git config, so gh is unauthenticated and push cannot authenticate. Probed inside a live jailed codex run, not inferred. MUST be invoked through the jail — the invoke line above is the control."
     residual_risk: "Egress is open, so an executor can still fetch and could exfiltrate. Closing that needs the account-scoped firewall rule in blueprint 21.8, which is an operator task."
+    # A hostname-filtering proxy now EXISTS (scripts/egress-proxy.py) and its allow
+    # list is proven by scripts/egress-proxy-check.py in CI. That is NOT egress being
+    # closed. A proxy only routes a cooperative process; the firewall rule that makes
+    # it the only available path has not been applied or probed. Do not read the
+    # proxy's existence as the unblock — docs/operator/egress-boundary.md step 4 is the
+    # measurement that would, and it is an operator task.
+    egress_boundary: NOT_PROVEN
+    # Stated rather than omitted: the model endpoint must stay reachable, and
+    # repository content can be placed in a prompt to it. The proxy reduces the
+    # exfiltration surface and cannot eliminate it. No hostname allow list can.
+    residual_risk_after_proxy: "Exfiltration through the permitted model endpoint itself remains possible by construction."
     forbidden_models:           # agy can serve these; doing so destroys Layer 2
       - "claude-*"
       - "gpt-oss-*"
