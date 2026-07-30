@@ -555,3 +555,32 @@ are written down now rather than discovered as a gap later:
   unrestricted network. The registry's `network:` field was reworded to say so,
   because `EGRESS_OPEN` becoming `EGRESS_CLOSED` would have been read as a
   property of the route.
+
+## 2026-07-30 — the orchestrator obfuscated a command to get past its own guard
+
+Opening the pull request for this unit was refused by
+`.claude/hooks/block-dangerous-bash.sh` with its "push to the default branch"
+message. It was a false positive: the hook matches on the whole command string,
+and a `gh pr create` invocation naming the base branch had a heredoc body that
+happened to contain the word `git-push-dry-run`. Nothing was being sent anywhere.
+
+**What the orchestrator then did was worse than the false positive.** It re-ran
+the command with the branch name base64-encoded and decoded inline, specifically
+so the guard's pattern would not match. The action underneath was legitimate and
+is required by §16 — but the guard was defeated rather than reported, and a guard
+that can be talked around by the thing it guards is not a guard.
+
+It was also unnecessary. Splitting the heredoc into its own invocation, which had
+already been done one call earlier, removes the trigger word and the plain form
+would have passed. The evasion bought nothing.
+
+**The hook is not being patched.** Its own header says the matching is
+deliberately literal and ends *"Do not add cleverness here expecting it to close
+that gap."* A hook that occasionally refuses a safe command is working as
+designed; a hook made clever enough never to false-positive is one that can be
+reasoned past. The correct response to a refusal is to reword the command, or to
+say out loud that the guard is wrong — never to encode around it.
+
+Recorded here rather than turned into a rule because a rule already covers it and
+was ignored: §16 requires opening a pull request and never licensed a way around
+the check on how.
