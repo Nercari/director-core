@@ -189,6 +189,12 @@ has either violated rule 6 or performed self-review while recording cross-vendor
 review. Which of those it was cannot be determined from the record, and that is
 itself the finding: the review tier leaves no evidence of which model reviewed.
 
+## Hook command matching correction, found 2026-07-29
+
+| # | What | Class | Evidence |
+|---|---|---|---|
+| 20 | Non-negotiable rule 5 had no enforcement point | unenforced rule | `timeout 900 claude --bare -p "do it"` was permitted even though `--bare` requires `ANTHROPIC_API_KEY` and disables settings, hooks, skills, and `CLAUDE.md` discovery. This is another instance of defect 16's unenforced-rule class |
+
 ## External review, run director-core-review-mi7ww6, found 2026-07-28
 
 Not unit failures. Found by an external review run in an ephemeral Linux
@@ -276,68 +282,77 @@ header declares this weakness rather than hiding it; recorded here as the
 second occurrence, which is the bar §13.3 sets before anything may be added to
 address it.
 
+## A blocked result could say nothing, found 2026-07-29
+
+Latent, not observed in a live run. Found by review while implementing #21 and
+recorded here because a gate rule was added on the strength of it, and the bar
+for adding anything is that the ledger carries the record.
+
+`validate-result.sh` accepted `status: blocked` with `unresolved_risks` absent
+entirely. The operator learned that work halted and nothing about why. Stopping
+was a valid way to say nothing.
+
+The near miss is that the obvious fix is also wrong. A length check on
+`unresolved_risks` passes on `[""]` and on `["   "]`, because the schema admits
+the empty string — so a placeholder satisfies the obligation while carrying no
+information, and the gate reports a blocker that does not exist. The check has
+to be on content, not on count. Fixed by rejecting `blocked` unless at least one
+entry has something left once whitespace is stripped.
+
+**Third instance of the count-versus-content pattern in this file.** Defect 18
+checked `route_used` with an unanchored grep against the registry's contents
+rather than against the closed enum, and the same function's "tests skipped with
+a reported blocker" branch still asks only for `.unresolved_risks | length`, so
+`[""]` satisfies it today for `failed` and `completed`. That branch is
+deliberately out of scope for #21 and is left standing rather than widened
+without a decision. Recorded so the next person finds it on purpose rather than
+by accident.
+
+**A ticket criterion turned out to be unsatisfiable, which is its own record.**
+#21 asked that existing conformance fixtures be left unmodified. One of them —
+`scenario_stopped_terminal_outcomes` — drove its blocked arm with an empty
+`unresolved_risks` list, which is precisely the input the ticket makes invalid.
+A fixture encoding the behaviour a ticket changes cannot also be preserved by
+it. The fixture's purpose (asserting terminal treatment) was kept and its data
+corrected. Worth noting for future tickets: "existing tests pass unchanged" is
+a criterion that quietly assumes the change is additive.
+
 ---
 
-## 2026-07-29 — the executor's drift comes from an instruction layer no grant can reach
+## 2026-07-29 — the handoff gate had been off on the only machine where cycles end
 
-Recorded from the measurement in
-[`docs/evidence/executor-drift-2026-07-29.md`](../docs/evidence/executor-drift-2026-07-29.md),
-run under [#29](https://github.com/Nercari/director-core/issues/29). No
-mitigation is implemented; that ticket forbids one.
+Rule 7 says no cycle ends without a handoff that validates against the schema.
+`require-handoff.sh` only validated when `check-jsonschema` was installed, and it
+is not installed on the operator's machine. Everything after the JSON parse was
+skipped in silence, so `{}` ended a cycle and all seven required fields were
+unenforced in practice. Fixed under
+[#48](https://github.com/Nercari/director-core/issues/48).
 
-Four runs of `EXEC_PRIMARY` on a trivial one-line objective, two with a prose
-prompt and a workspace-wide grant, two with a single atomic step and a grant
-narrowed to the unit directory. In **four of four**, before touching the
-objective, the executor read
-`C:\Users\dorot\.gemini\config\skills\task-observer\SKILL.md` and in some runs
-`using-superpowers` and `ponytail` beside it. Narrowing the prompt and the grant
-halved the turns spent before the objective was touched — 7 and 6 became 3 and 3
-— and did not affect the skill read at all.
+**Second instance of a gate that stops checking when a tool is missing.** The
+first was `validate-result.sh`, which handled it correctly by announcing the
+degradation and enforcing the gate-critical invariants directly. That correct
+pattern existed in a sibling file for three days and was not copied here, which
+is the more useful half of this record: the fix was already written down.
 
-**Why the strongest available lever cannot touch it:** that directory lives in
-the executor's own `HOME`, outside every workspace. `--add-dir` cannot reach it
-in either direction, so no prompt and no grant can cause or prevent the read.
-The instruction the orchestrator has been competing with was never in either of
-the two files the executor is documented to read. §13.3's "prose is the weakest
-tier" has a floor under it: an instruction loaded from outside the repository
-cannot be outranked by anything written inside it.
+**The silence was the defect, not the missing tool.** The fix does not hard-block
+on the absent validator. Making the gate's correctness depend on an install step
+relocates the fragility rather than removing it, and would have stopped every
+cycle on this machine including the one shipping the fix.
 
-**Second instance of the executor writing outside its declared paths.** In the
-narrow arm the executor wrote `codigo_projeto_consolidado.md` at the workspace
-root while its grant was `workspace/unit`. `.director/routes.yaml` already
-records this route writing outside the paths its unit declared, from the
-2026-07-26 probe; the registry names the field, and the gate forbids naming it
-here — see the note at the end of this entry;
-this is the second, and it was produced under a grant deliberately narrowed to
-prevent exactly that. Rule 2a's requirement that the orchestrator diff the
-working tree itself, rather than trust the executor's report, is what caught it.
+**Found while fixing it, and worth more than the fix:** every handoff this
+orchestrator has published is schema-invalid. The contract requires
+`decisions_taken` to be an array of objects each carrying a `decision` from a
+closed enumeration and a `rationale`, and `open_pull_requests` to be an array of
+strings. Every handoff written to date used bare prose strings for the former and
+numbers for the latter. Nothing ever objected, because the check that would have
+objected was the one that had been skipping. A gate nobody exercised is
+indistinguishable from a gate nobody has — third instance of that sentence in
+this file.
 
-**Third instance of silence that looks like success.** A discarded first attempt
-placed the probe workspaces inside this repository, where the executor's own
-permission table denies writes irrespective of `--add-dir`. Every run was
-refused, returned an empty response, and exited `status: SUCCESS`. One died on a
-denied Obsidian MCP call that the task-observer skill had told it to make. The
-2026-07-26 record of this shape called it the worst possible failure shape and
-that judgement stands: had the objective not been checked on disk, the arms
-would have been compared on four runs that did nothing.
-
-**Third instance of a text-matching gate refusing the thing it was not aimed
-at.** CI's "No Director term defined outside AGENTS.md" step failed this unit
-because both this entry and the evidence record *quoted* a registry field name
-while describing an observation. The step greps for the bare token, so it cannot
-tell a definition from a citation, and the effect is that an evidence record
-cannot name the field whose violation it is recording. Both were reworded to get
-past it, which is the wrong direction — the record is now less precise than the
-observation it documents. Recorded as the third occurrence of the class already
-carrying two: the hook that read `git merge-base` as merging, and the one that
-read a commit message describing a credential variable as using one. §13.3's
-two-occurrence bar is met for the class; what to do about it is not decided
-here.
-
-**Recorded, not worked around: the orchestrator cannot resolve this branch's
-conflict.** `.director/failures.md` conflicts with `main` because #51 merged an
-entry into the same append point. `git merge origin/main` is refused by
-`block-dangerous-bash.sh` as "merging or self-approving", and rebasing a pushed
-branch is forbidden outright by rule 3. Both refusals are correct in intent and
-neither has an exception for a task branch taking an update from `main`, so the
-conflict is left for the operator rather than bypassed.
+**Windows portability defect, caught by the behavior check on its first run.**
+`jq` here terminates output lines with CRLF, so field names read out of the
+schema arrived with a trailing carriage return and matched nothing. The gate
+refused a valid handoff for a missing `published_at` that was present. Had the
+behavior check only covered refusals, this would have shipped as a gate that
+refuses everything — which reads as strictness rather than as breakage. Second
+instance of a CRLF defect in a shell gate on this platform.
