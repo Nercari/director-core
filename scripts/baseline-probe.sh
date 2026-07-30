@@ -94,7 +94,25 @@ else
 fi
 
 # Dry run only. If this ever reports "[new branch]" the account can push.
+#
+# The two prompt guards are load-bearing. Added 2026-07-30 after this probe HUNG
+# INDEFINITELY under the restricted account: with safe.directory configured, Git
+# got far enough to contact the remote, found no stored credential for that
+# account, and handed off to Git Credential Manager, which printed "please
+# complete authentication in your browser" and waited — in a runas console with
+# no usable browser session. It never returned, and it was holding the firewall
+# rules disabled while it waited.
+#
+# scripts/exec-jail.sh already sets exactly these two variables, for exactly this
+# reason, and says so in its comments. The guard existed in a sibling file and was
+# not carried across.
+#
+# Turning a prompt into an immediate failure does not weaken the measurement — it
+# IS the measurement. "This account cannot authenticate to the gate" is an answer;
+# a hang is the absence of one. Setting them inline keeps the run-it-verbatim
+# contract: still no arguments, still no edits.
 probe git-push-dry-run \
+  env GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never \
   git -C "$ROOT" push --dry-run origin "HEAD:$DEAD_REF"
 
 # --- NETWORK ----------------------------------------------------------------

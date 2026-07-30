@@ -404,3 +404,65 @@ approach has failed and must be replaced rather than patched with more rules;
 the operator doc names the fallbacks in the order worth trying. This is the
 plan because the alternative is known broken, not because it has been
 demonstrated.
+
+---
+
+## 2026-07-30 — the registry described a machine state that had not existed for days
+
+Three findings from taking the restricted-account baseline for
+[#31](https://github.com/Nercari/director-core/issues/31). Evidence:
+[`docs/evidence/baseline-director-exec-2026-07-30.md`](../docs/evidence/baseline-director-exec-2026-07-30.md).
+
+**1. `blocked_on: "Egress is open"` was false when written.** Two SID-scoped
+deny-all-outbound rules for `director-exec` had been live since an earlier
+session. The account could reach nothing — the first baseline attempt failed every
+network probe in 10 to 16 milliseconds, which is a local refusal, not a timeout.
+Meanwhile the operator document being written described *creating* those rules,
+under names that would have duplicated them, and the unit shipped saying the
+firewall step was pending.
+
+**Second instance of registry drift where the wrong value was the load-bearing
+one.** The first was the blueprint's registry snapshot, which had five fields
+wrong including a quarantine flag inverted on the only usable executor route.
+Both times the drift did not merely misinform, it pointed the next action in the
+wrong direction. `routes.yaml` now records
+`egress_boundary: DENY_LIVE_ALLOW_MISSING_PROBE_NOT_RUN`, which is longer than
+NOT_PROVEN and says which part is missing.
+
+**2. The baseline probe hung indefinitely, holding the boundary disabled.** With
+`safe.directory` configured, the push probe got far enough to contact the remote,
+found no stored credential, and handed off to Git Credential Manager, which
+printed "please complete authentication in your browser" into a `runas` console
+that has no usable browser session. It waited forever — during a window in which
+the deny rules had been *deliberately disabled* to take a clean measurement. A
+hang is not merely a stalled probe here; it is a stalled probe with the control
+switched off.
+
+`scripts/exec-jail.sh` had set `GIT_TERMINAL_PROMPT=0` and `GCM_INTERACTIVE=never`
+for precisely this reason since the day it was written, and explains why in its
+own comments. `baseline-probe.sh` did not. **Third instance of a fix that already
+existed in a sibling file and was not carried across** — the first was
+`validate-result.sh`'s missing-validator degradation, which `require-handoff.sh`
+took three days to copy. The pattern is not ignorance of the fix. It is not
+looking for one.
+
+**3. An observation that may retire a control rather than add one.**
+`exec-jail.sh` exists to strip gate credentials from the executor's environment.
+`director-exec` has none to strip: `gh auth status` reports no login, `gh api`
+refuses, and `git push --dry-run` cannot read a username, with no wrapper
+involved. The account boundary alone produces what the wrapper was built to
+produce, and it cannot be forgotten at the call site the way an invocation can.
+
+Recorded as an observation, not a decision.
+[#32](https://github.com/Nercari/director-core/issues/32) still owns probing the
+wrapper against this executor and this does not close it. But §4.1 principle 10
+prefers removing a capability over guarding it, and this is the first evidence
+that the capability may already be absent — in which case the correct outcome is
+deleting a control, not keeping two.
+
+**One thing that went right, worth recording because it was nearly lost.** The
+deny rules were *disabled* rather than deleted to take the baseline, so the SDDL
+never had to be reconstructed, and re-enabling was one command. Had they been
+deleted, restoring them would have meant rebuilding the scoping by hand — the
+step most likely to produce an unscoped Block rule applying to every account on
+the machine.

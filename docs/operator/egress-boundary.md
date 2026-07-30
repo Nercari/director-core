@@ -27,36 +27,89 @@ and address churn stops being an outage.
 
 ## Honest status of this design
 
-This inversion comes from a single external opinion and **has not been probed**.
-It is the plan because the recorded alternative is known broken, not because it
-has been demonstrated. `scripts/egress-boundary-probe.sh` is what decides it.
+The hostname-filtering half has **not been probed end to end**. It is the plan
+because the recorded alternative is known broken, and
+`scripts/egress-boundary-probe.sh` is what decides it.
 
-One specific uncertainty, stated rather than buried: **user-scoped outbound
-filtering is the load-bearing assumption and it is unverified here.**
-`New-NetFirewallRule` accepts `-LocalUser`, and the parameter exists on this
-machine, but whether Windows enforces it for outbound traffic from an ordinary
-console process on this build is exactly what step 4 measures. If the probe
-finds direct egress still succeeds, this approach has failed and must be
-replaced — not patched with more rules. Candidate fallbacks, in the order worth
-trying: run the executor under a Windows service or job object with its own
-service SID and scope the rule to that; or put the executor in a network
-namespace equivalent, meaning a container or a VM with no route except the
-proxy's. Record whichever, and why, before building it.
+**Corrected 2026-07-30. Two things this document previously got wrong.**
 
-## Order matters — step 1 cannot be done later
+**1. The deny rules already exist.** Created in an earlier session, live ever
+since. `Get-NetFirewallRule` shows:
 
-### 1. Baseline the restricted account BEFORE any rule exists
-
-```powershell
-runas /user:director-exec "\"C:\Program Files\Git\bin\bash.exe\" -lc \"cd '/c/Users/dorot/Documents/AI Projects/director-core' && bash scripts/baseline-probe.sh\""
+```
+director-exec: deny all outbound (IPv4)            Block  Outbound  Any/Any->Any
+director-exec: deny all outbound (UDP 443 / QUIC)  Block  Outbound  UDP/Any->443
 ```
 
-Save the output. The existing baseline was taken under `dorot`, a different
-account with different rights, so it cannot serve as the before-column for
-`director-exec`. **Once the deny rule is in place this measurement is
-unrecoverable**, and every later refusal becomes indistinguishable from an
-account that never had access in the first place. This is the ordering error that
-sank an earlier version of this plan.
+Both scoped to `D:(A;;CC;;;S-1-5-21-…-1010)`, which is `director-exec`. So the
+rules step below is **not** building a boundary from nothing — it adds the two
+*allow* rules that were missing. Creating rules under this document's original
+names would have produced duplicates. What the account lacked was never the deny.
+It was the permit, and with the deny present and no permit it simply had no route
+out at all.
+
+The `(IPv4)` rule is `Any/Any->Any` and does cover IPv6 — the name is wrong, the
+rule is not. Do not "fix" it by narrowing it to IPv4: the 2026-07-30 baseline
+shows this machine reaching both the model host and the gate over IPv6, so an
+IPv4-only rule would be decorative.
+
+**2. `-LocalUser` enforcement is verified, not assumed.** This document used to
+call it the unverified assumption the whole design rested on. It got settled
+incidentally: `director-exec` was refused every network probe in 10–16 ms while
+`dorot` reached the internet normally on the same machine, under exactly these
+SID-scoped rules. Windows enforces it for an ordinary console process on this
+build.
+
+Fallbacks are retained in case a future build regresses, not because the question
+is open: run the executor under a Windows service or job object with its own
+service SID and scope the rule to that; or put it in a network-namespace
+equivalent, a container or VM with no route except the proxy's. Record which, and
+why, before building it.
+
+## Order matters
+
+### 1. Baseline the restricted account — DONE 2026-07-30
+
+Recorded in
+[`docs/evidence/baseline-director-exec-2026-07-30.md`](../evidence/baseline-director-exec-2026-07-30.md).
+Do not redo it unless the account or the machine changes.
+
+It had to be taken with the existing deny rules **temporarily disabled**, because
+they were already live — a baseline taken with them on measures our own boundary,
+not the account's unrestricted state. That recovery is the only reason this
+document's original claim ("once the deny rule is in place this measurement is
+unrecoverable") did not cost the whole plan. Disable, never delete: the SDDL then
+does not have to be reconstructed.
+
+```powershell
+Get-NetFirewallRule -DisplayName "director-exec: *" | Disable-NetFirewallRule
+Get-NetFirewallRule -DisplayName "director-exec: *" | Select-Object DisplayName,Enabled
+```
+
+Both must read `False` before the probe runs, and `True` again immediately after:
+
+```powershell
+Get-NetFirewallRule -DisplayName "director-exec: *" | Enable-NetFirewallRule
+```
+
+**A probe that hangs leaves the rules disabled.** That happened on 2026-07-30:
+the push probe reached Git Credential Manager, printed *"please complete
+authentication in your browser"* into a `runas` console with no browser session,
+and waited indefinitely with the boundary switched off. `baseline-probe.sh` now
+sets `GIT_TERMINAL_PROMPT=0` and `GCM_INTERACTIVE=never` on that probe so a
+credential prompt is an immediate failure instead of a hang. If any future probe
+does hang: close the window, re-enable the rules, then diagnose. In that order.
+
+The restricted account also needs read access to the repository and its own
+`safe.directory` entry, or the push probe dies on dubious ownership before it
+measures anything:
+
+```powershell
+icacls "C:\Users\dorot\Documents\AI Projects\director-core" /grant "director-exec:(OI)(CI)RX" /T
+```
+
+Read and execute only. The executor never needs write access to the operator's
+checkout.
 
 ### 2. Start the proxy
 
@@ -73,10 +126,11 @@ needs no privileges and no network:
 python "C:\Users\dorot\Documents\AI Projects\director-core\scripts\egress-proxy-check.py"
 ```
 
-### 3. Apply the rules
+### 3. Add the two missing allow rules
 
-Run as Administrator. The SID is read live rather than pasted, so a rebuilt
-account cannot leave a rule pointing at a principal that no longer exists.
+The two deny rules already exist and must be left alone. Only these two are
+missing. Run as Administrator; the SID is read live rather than pasted, so a
+rebuilt account cannot leave a rule pointing at a principal that no longer exists.
 
 ```powershell
 $sid = (Get-LocalUser -Name director-exec).SID.Value
@@ -87,15 +141,19 @@ New-NetFirewallRule -DisplayName "director-exec: allow DNS" -Direction Outbound 
 
 New-NetFirewallRule -DisplayName "director-exec: allow local proxy" -Direction Outbound `
   -Action Allow -Protocol TCP -RemoteAddress 127.0.0.1 -RemotePort 8899 -LocalUser $sddl
-
-New-NetFirewallRule -DisplayName "director-exec: deny QUIC" -Direction Outbound `
-  -Action Block -Protocol UDP -RemotePort 443 -LocalUser $sddl
-
-New-NetFirewallRule -DisplayName "director-exec: deny all other outbound" -Direction Outbound `
-  -Action Block -LocalUser $sddl
 ```
 
-Notes on the four rules, because each is load-bearing:
+Then confirm exactly four `director-exec:` rules exist and every one is
+SID-scoped. If any reports `Any`, stop — an unscoped Block rule would apply to
+every account on the machine:
+
+```powershell
+Get-NetFirewallRule -DisplayName "director-exec: *" | ForEach-Object {
+  "{0} | {1} | {2}" -f $_.DisplayName, $_.Action,
+    (Get-NetFirewallSecurityFilter -AssociatedNetFirewallRule $_).LocalUser }
+```
+
+Notes, because each rule is load-bearing:
 
 - **DNS is permitted deliberately.** The proxy resolves names, and a probe that
   cannot resolve produces refusals with two possible causes, which proves
@@ -112,9 +170,38 @@ Notes on the four rules, because each is load-bearing:
 
 ### 4. Prove it by attempting the forbidden action
 
-```powershell
-runas /user:director-exec "\"C:\Program Files\Git\bin\bash.exe\" -lc \"cd '/c/Users/dorot/Documents/AI Projects/director-core' && bash scripts/egress-boundary-probe.sh\""
+`runas` mis-parses a quoted command containing both a space and a colon, so put
+the command in a script and point `runas` at the script. Both accounts need to
+reach it, so not `%TEMP%`. In `cmd`:
+
 ```
+mkdir C:\Temp
+(
+echo set -e
+echo export GIT_TERMINAL_PROMPT=0
+echo export GCM_INTERACTIVE=never
+echo cd '/c/Users/dorot/Documents/AI Projects/director-core'
+echo bash scripts/egress-boundary-probe.sh ^> /c/Temp/director-exec-after.txt 2^>^&1
+) > C:\Temp\boundary-run.sh
+```
+
+`^` escapes the redirection characters so they land literally in the file instead
+of being consumed by `cmd`. Grant the restricted account write access to that
+directory once, as Administrator:
+
+```powershell
+icacls C:\Temp /grant "director-exec:(OI)(CI)M"
+```
+
+Then run it. Note only the executable path is quoted — quoting the argument after
+`-lc` is what triggers the mis-parse:
+
+```
+runas /user:director-exec "\"C:\Program Files\Git\bin\bash.exe\" -lc /c/Temp/boundary-run.sh"
+```
+
+The console opens, runs, and closes itself. Read the output with
+`type C:\Temp\director-exec-after.txt`.
 
 Read the `DIRECT, WITH THE PROXY VARIABLES UNSET` section **first**. Every probe
 in it must fail. A success there means the executor can decline the proxy, and
