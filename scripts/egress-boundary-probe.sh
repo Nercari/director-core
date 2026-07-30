@@ -131,7 +131,26 @@ else
   printf 'PROBE  %-28s exit=127\n       | gh not on PATH\n\n' "gh-auth-status"
   printf 'PROBE  %-28s exit=127\n       | gh not on PATH\n\n' "gh-api-user"
 fi
-probe git-push-dry-run git -C "$ROOT" push --dry-run origin "HEAD:$DEAD_REF"
+# The proxy variables are exported for curl's benefit, and Git for Windows
+# rejects a value curl accepts. On 2026-07-30 this probe exited 128 on
+# "Unsupported proxy syntax" and "Malformed input to a URL function", dying
+# before it ever reached authentication — a failure reported under a name that
+# claims to measure credentials. Remove the variables and blank the proxy config
+# so a failure here is a network or credential failure and nothing else. The
+# prompt guards are the ones baseline-probe.sh already carried after a
+# credential prompt hung a run with the boundary switched off.
+git_push_dry_run() {
+  env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy \
+    GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never \
+    git -C "$ROOT" -c http.proxy= -c https.proxy= \
+      push --dry-run origin "HEAD:$DEAD_REF"
+}
+
+# While the boundary is up this probe cannot separate "holds no credentials"
+# from "has no route": both produce a failure. The gh probes above reach the
+# credential answer without touching the network, so read them for that and read
+# this one only as "the push did not succeed".
+probe git-push-dry-run git_push_dry_run
 
 hr
 echo "No verdict is printed on purpose. Read the DIRECT section first: if any"

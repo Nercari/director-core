@@ -35,26 +35,58 @@ routes:
     # false. A conformance probe proved agy under --sandbox reaches the public
     # network AND holds live gh credentials with repo+workflow scope, and writes
     # outside allowed_paths. --sandbox restricted none of it.
-    network: EGRESS_OPEN                 # DNS + public reads work. Not closed.
+    # Superseded 2026-07-30 by the boundary probe. TCP egress from the restricted
+    # account is now closed and measured; see egress_boundary below. The value is
+    # kept rather than deleted because it describes the state of an executor run
+    # under the OPERATOR's account, which is still open — the boundary is a
+    # property of director-exec, not of this tool.
+    network: EGRESS_OPEN_UNLESS_RUN_AS_DIRECTOR_EXEC
     gate_credentials: REMOVED_BY_EXEC_JAIL
     quarantined: true                    # NOT USABLE — see blocked_on below
-    blocked_on: "Egress is open, and exec-jail has never been probed against agy. Unblock order: close egress (21.9), then re-probe the jail against agy, then reconsider."
+    # Corrected 2026-07-30 (second time). The egress half is now done and
+    # measured. Only the jail probe remains between this route and reconsideration.
+    blocked_on: "exec-jail has never been probed against agy (#32). TCP egress is closed and measured as of 2026-07-30; UDP/443 is denied by rule but unmeasured."
     jail_verified: false                 # exec-jail was proven against codex, NOT against agy
     enforcement: "scripts/exec-jail.sh empties GH_CONFIG_DIR and nulls git config, so gh is unauthenticated and push cannot authenticate. Probed inside a live jailed codex run, not inferred. MUST be invoked through the jail — the invoke line above is the control."
-    residual_risk: "Egress is open, so an executor can still fetch and could exfiltrate. Closing that needs the account-scoped firewall rule in blueprint 21.8, which is an operator task."
-    # A hostname-filtering proxy now EXISTS (scripts/egress-proxy.py) and its allow
-    # list is proven by scripts/egress-proxy-check.py in CI. That is NOT egress being
-    # closed. A proxy only routes a cooperative process; the firewall rule that makes
-    # it the only available path has not been applied or probed. Do not read the
-    # proxy's existence as the unblock — docs/operator/egress-boundary.md step 4 is the
-    # measurement that would, and it is an operator task.
+    residual_risk: "Under the operator's account an executor can still fetch and could exfiltrate. Closed only when run as director-exec, whose boundary was measured 2026-07-30. Running an executor under any other account bypasses the boundary entirely — the rules are SID-scoped, so the account IS the enforcement."
+    # A hostname-filtering proxy exists (scripts/egress-proxy.py), its allow list is
+    # proven by scripts/egress-proxy-check.py in CI, and as of 2026-07-30 the firewall
+    # rules that make it the only available TCP path have been applied and probed.
+    # The proxy alone was never the unblock and still is not: it routes only a
+    # cooperative process. What closes the path is the pair of SID-scoped Block rules
+    # listed below, measured with the machine-wide default left at Allow so the
+    # attribution is unambiguous.
     # Corrected 2026-07-30. The value below was NOT_PROVEN and the blocked_on line
     # above said "Egress is open". Both were wrong at the time they were written:
     # two SID-scoped deny-all-outbound rules for the restricted account had been
     # live since an earlier session, with no matching allow rules, so the account
     # had no route out at all. The registry described a machine state that had not
     # existed for days. See docs/evidence/baseline-director-exec-2026-07-30.md.
-    egress_boundary: DENY_LIVE_ALLOW_MISSING_PROBE_NOT_RUN
+    # Corrected again 2026-07-30, this time by measurement rather than by reading
+    # the machine. The probe ran under director-exec with the machine-wide default
+    # left at Allow, so every refusal is attributable to two SID-scoped Block rules
+    # and to nothing else. Direct TCP to the model host, the gate, and an arbitrary
+    # third host all failed in 11-26 ms with the proxy variables removed. Through
+    # the proxy the model host answered and the other two were refused 403.
+    # Evidence: docs/evidence/egress-boundary-2026-07-30.md
+    egress_boundary: TCP_CLOSED_MEASURED_2026_07_30
+    # Named separately because it is NOT covered by the line above and must not be
+    # read as covered. QUIC would route around a TCP-only policy. The Block rule
+    # denies UDP outbound on every port except 53, so the rule exists — but this
+    # curl has no HTTP3 support and the refusal has never been observed. Rule
+    # present, traffic unmeasured. Do not upgrade this without a probe that emits
+    # a UDP/443 datagram.
+    quic_udp_443: DENIED_BY_RULE_NEVER_MEASURED
+    # The boundary is carried by the two Block rules. DNS is carved OUT of the UDP
+    # Block rule by port range rather than permitted by a sibling Allow rule: an
+    # Allow rule for UDP/53 was live and DNS still failed, because Block defeats
+    # Allow at equal specificity on this build. Loopback needs no Allow rule at all
+    # (Windows does not filter loopback); the one present documents intent only.
+    boundary_rules_2026_07_30:
+      - "director-exec: deny TCP outbound        Block TCP  any"
+      - "director-exec: deny UDP except DNS      Block UDP  1-52,54-65535"
+      - "director-exec: allow DNS                Allow UDP  53"
+      - "director-exec: allow local proxy        Allow TCP  127.0.0.1:8899"
     # Settled incidentally on 2026-07-30 rather than argued: the restricted account
     # was refused every network probe in 10-16 ms while the operator's account
     # reached the internet on the same machine, under SID-scoped rules. Windows

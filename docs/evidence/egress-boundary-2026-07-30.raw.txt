@@ -1,0 +1,175 @@
+Raw output of scripts/egress-boundary-probe.sh, run under director-exec on
+Pedro-dsktp, 2026-07-30. Pasted verbatim by the operator; the orchestrator did
+not run it and cannot run it.
+
+THIS IS THE THIRD RUN. The first two are reproduced below it, because the
+difference between them is the whole attribution argument and dropping them
+would leave this run looking cleaner than it earned.
+
+Firewall state at the time of RUN 3, confirmed after the run:
+
+    Get-NetFirewallProfile -All | Select-Object Name, DefaultOutboundAction
+    Domain   Allow
+    Private  Allow
+    Public   Allow
+
+    director-exec: deny TCP outbound      Block  Outbound  TCP/Any->Any
+    director-exec: deny UDP except DNS    Block  Outbound  UDP/Any->1-52,54-65535
+    director-exec: allow DNS              Allow  Outbound  UDP/Any->53
+    director-exec: allow local proxy      Allow  Outbound  TCP/127.0.0.1:8899
+
+All four scoped to D:(A;;CC;;;S-1-5-21-3373388009-2580916617-4075887755-1010).
+Machine default outbound is Allow on every profile, so every refusal below is
+attributable to the two SID-scoped Block rules and to nothing else.
+
+================================================================================
+RUN 3 — 2026-07-30, deny rules only, machine default Allow. THE RECORDED RUN.
+================================================================================
+
+director egress boundary probe
+------------------------------------------------------------
+account      director-exec
+machine      Pedro-dsktp
+os           MINGW64_NT-10.0-26200 3.6.7-fb42d713.x86_64
+repo         /c/Users/dorot/Documents/AI Projects/director-core
+gate         github.com / api.github.com
+model_host   generativelanguage.googleapis.com
+blocked_host example.com
+proxy        http://127.0.0.1:8899
+------------------------------------------------------------
+
+== NAME RESOLUTION ==
+Permitted by design. A failure here invalidates the rest of this run.
+
+PROBE  dns-model                         exit=0
+       | Non-authoritative answer:
+       | Name:      generativelanguage.googleapis.com
+       | Addresses: 2001:4860:4846:400::
+                    2001:4860:4843:400::
+                    2001:4860:4844:400::
+                    2001:4860:4840:400::
+                    2001:4860:4842:400::
+                    2001:4860:4841:400::
+                    2001:4860:4847:400::
+                    2001:4860:4845:400::
+                    172.217.114.4
+                    172.217.113.4
+                    172.217.119.4
+                    172.217.118.4
+                    172.217.116.4
+                    172.217.117.4
+                    172.217.115.4
+                    172.217.112.4
+
+PROBE  dns-gate                          exit=0
+       | Non-authoritative answer:
+       | Server:  UnKnown
+       | Address: 2804:7f74:8000:1:250:56ff:fe9d:bebe
+       |
+       | Name:    github.com
+       | Address: 4.228.31.150
+
+== THROUGH THE PROXY ==
+The model host must be reachable here. Everything else must not.
+
+PROBE  proxy-model-host                  exit=0
+       | http_code=404 remote_ip=127.0.0.1 time=1.002006s
+
+PROBE  proxy-gate-host                   exit=56
+       | curl: (56) CONNECT tunnel failed, response 403
+       | http_code=000 remote_ip= time=0.001233s
+
+PROBE  proxy-blocked-host                exit=56
+       | curl: (56) CONNECT tunnel failed, response 403
+       | http_code=000 remote_ip= time=0.001402s
+
+== DIRECT, WITH THE PROXY VARIABLES UNSET ==
+Every probe in this section MUST fail. A success here means the proxy is
+optional, the executor can decline it, and the boundary does not exist.
+
+PROBE  direct-model-host                 exit=7
+       | curl: (7) Failed to connect to generativelanguage.googleapis.com port 443 after 26 ms: Could not connect to server
+       | http_code=000 remote_ip= time=0.026554s
+
+PROBE  direct-gate-host                  exit=7
+       | curl: (7) Failed to connect to api.github.com port 443 after 11 ms: Could not connect to server
+       | http_code=000 remote_ip= time=0.011581s
+
+PROBE  direct-blocked-host               exit=7
+       | curl: (7) Failed to connect to example.com port 443 after 16 ms: Could not connect to server
+       | http_code=000 remote_ip= time=0.016723s
+
+PROBE  direct-quic-model                 exit=127
+       | curl has no HTTP3 support; UDP/443 not probed here.
+       | The firewall rule is still required - see the operator doc.
+
+== CREDENTIALS ==
+Recorded independently of every network result above.
+
+PROBE  gh-auth-status                    exit=1
+       | You are not logged into any GitHub hosts. To log in, run: gh auth login
+
+PROBE  gh-api-user                       exit=4
+       | To get started with GitHub CLI, please run: gh auth login
+       | Alternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.
+
+PROBE  git-push-dry-run                  exit=128
+       | fatal: unable to access 'https://github.com/Nercari/director-core.git/':
+         Unsupported proxy syntax in '127.0.0.1[...]
+       | Malformed input to a URL function
+
+    [Operator's paste truncated the proxy value mid-string; the bracketed
+    ellipsis is the truncation, not the program's output. See the analysis
+    file: this probe failed before reaching authentication and therefore
+    measured nothing about credentials on this run.]
+
+================================================================================
+RUN 2 — 2026-07-30T01:18:18Z, machine default Block. DISCARDED, CONFOUNDED.
+================================================================================
+
+Identical in every observable respect to RUN 3: DNS resolved, the model host
+tunnelled through the proxy with http_code=404, the gate and the blocked host
+were refused 403 at the proxy, and all three direct probes failed at 11-18 ms.
+
+It is discarded anyway. It was taken while the machine-wide
+DefaultOutboundAction was Block on all three profiles, so a failing direct probe
+had two sufficient causes and the run could not attribute the refusal to the
+account-scoped rules. It also ran under a configuration that was reverted
+immediately afterwards, so it described a machine state that no longer existed.
+
+Its one durable contribution is the pair with RUN 1 below.
+
+================================================================================
+RUN 1 — 2026-07-30T01:14:14Z. FAILED ITS OWN PRECONDITION.
+================================================================================
+
+== NAME RESOLUTION ==
+
+PROBE  dns-model                         exit=0
+       | *** Request to UnKnown timed-out
+       | DNS request timed out.
+       |     timeout was 2 seconds.
+       | Server:  UnKnown
+       | Address:  2804:7f74:8000:1:250:56ff:fe9d:bebe
+       |
+       | DNS request timed out.
+       |     timeout was 2 seconds.
+       | DNS request timed out.
+       |     timeout was 2 seconds.
+       | DNS request timed out.
+       |     timeout was 2 seconds.
+       | DNS request timed out.
+       |     timeout was 2 seconds.
+
+Run abandoned here, per the script's own instruction that a resolution failure
+invalidates everything after it.
+
+State at the time: the two original deny-all-outbound rules were live AND both
+allow rules existed and were Enabled. DNS still failed. That pair — allow rule
+present, DNS dead; deny rule reshaped, DNS alive in RUN 3 — is the evidence that
+a Block rule defeats an Allow rule at equal specificity on this build, and the
+reason the final design carves DNS out of the Block rule by port range instead
+of trying to permit it alongside one.
+
+Note also that nslookup exits 0 on total resolution failure. Exit code alone
+would have read this as a pass.
