@@ -73,3 +73,12 @@ jobs:
       # not only on an operator machine that happens to lack the tool.
       - name: handoff validation degrades rather than stops checking
         run: bash .claude/hooks/handoff-degradation-demo.sh
+
+      # Reaches no external network: every allowed target in the check is a local
+      # socket, so the result is the same on a runner with no egress as on one
+      # with it. It proves the proxy's allow list, and only that. The boundary —
+      # that the executor cannot go around the proxy — is a firewall property, is
+      # an operator task, and the check says so where it would otherwise be
+      # mistaken for proof.
+      - name: egress proxy allows by hostname and refuses everything else
+        run: python scripts/egress-proxy-check.py

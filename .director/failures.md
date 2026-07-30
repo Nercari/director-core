@@ -356,3 +356,51 @@ refused a valid handoff for a missing `published_at` that was present. Had the
 behavior check only covered refusals, this would have shipped as a gate that
 refuses everything — which reads as strictness rather than as breakage. Second
 instance of a CRLF defect in a shell gate on this platform.
+
+---
+
+## 2026-07-30 — the recorded plan for closing egress could not have worked
+
+Not a unit failure. A design defect in this repository's own recorded plan,
+found before it was built, under
+[#31](https://github.com/Nercari/director-core/issues/31).
+
+Blueprint §21.8/§21.9 recorded the fix for open egress as blocking the gate's
+published IP ranges. That fails in **both** directions at once, and the
+2026-07-28 baseline had already recorded the evidence without the conclusion
+being drawn: the model host answered from eight rotating IPv4 addresses in a
+shared Google range. Permitting the model API by address can therefore permit the
+gate, and refusing the gate by address can refuse the model — on a DNS change
+nobody made.
+
+Replaced by denying outbound by default for the restricted account, permitting
+only name resolution and a loopback proxy, and letting the proxy allow the model
+API by hostname. Nothing is allowlisted by address.
+
+**Second instance of an observation recorded without its consequence.** The
+baseline noted the rotating shared addresses explicitly and called it "an
+observation only". The `network: denied` correction was the first: the probe
+output that refuted the claim had been available before anyone looked. Writing
+something down and reading what it implies are different acts.
+
+**What is deliberately NOT claimed.** The proxy is built and its allow list is
+proven in CI, including that it matches labels rather than substrings and that a
+policy refusal is distinguishable from an upstream failure. None of that closes
+egress. A proxy routes only a cooperative process, and the firewall rule that
+makes it the sole path is an operator task that has not been applied or probed.
+The registry now carries `egress_boundary: NOT_PROVEN` so the proxy's existence
+cannot be misread as the unblock — the same failure shape as the four
+"declaration nobody exercised" entries above, pre-empted rather than repeated.
+
+**One residual stated rather than omitted:** the model endpoint must stay
+reachable and repository content can be placed in a prompt to it. No hostname
+allow list can prevent that. It is recorded in the registry as
+`residual_risk_after_proxy`.
+
+**The load-bearing assumption is unverified and labelled as such.** Whether
+Windows enforces `-LocalUser` for outbound traffic from an ordinary console
+process on this build is exactly what the probe measures. If it does not, the
+approach has failed and must be replaced rather than patched with more rules;
+the operator doc names the fallbacks in the order worth trying. This is the
+plan because the alternative is known broken, not because it has been
+demonstrated.
