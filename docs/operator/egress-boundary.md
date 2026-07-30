@@ -25,33 +25,33 @@ resolution and the local proxy — and let the proxy allow the model API **by
 hostname**. Nothing is allowlisted by address, so CDN sharing stops being a hole
 and address churn stops being an outage.
 
-## Honest status of this design
+## Status: probed 2026-07-30, TCP half proven
 
-The hostname-filtering half has **not been probed end to end**. It is the plan
-because the recorded alternative is known broken, and
-`scripts/egress-boundary-probe.sh` is what decides it.
+`scripts/egress-boundary-probe.sh` ran under `director-exec` and every direct
+TCP probe failed while the proxy path worked. Evidence:
+[`docs/evidence/egress-boundary-2026-07-30.md`](../evidence/egress-boundary-2026-07-30.md).
 
-**Corrected 2026-07-30. Two things this document previously got wrong.**
+**UDP/443 is denied by rule and has never been observed being denied** — this
+curl has no HTTP3 support. That gap is real and is recorded in the registry as
+`quic_udp_443`.
 
-**1. The deny rules already exist.** Created in an earlier session, live ever
-since. `Get-NetFirewallRule` shows:
+**The rule shape below was rewritten after the first attempt failed.** Sections 3
+and 4 no longer describe what was originally written here; read them rather than
+recalling them.
 
-```
-director-exec: deny all outbound (IPv4)            Block  Outbound  Any/Any->Any
-director-exec: deny all outbound (UDP 443 / QUIC)  Block  Outbound  UDP/Any->443
-```
+**History, because this document has been wrong twice and both errors cost a run.**
 
-Both scoped to `D:(A;;CC;;;S-1-5-21-…-1010)`, which is `director-exec`. So the
-rules step below is **not** building a boundary from nothing — it adds the two
-*allow* rules that were missing. Creating rules under this document's original
-names would have produced duplicates. What the account lacked was never the deny.
-It was the permit, and with the deny present and no permit it simply had no route
-out at all.
+**1. Deny rules pre-existed and this document did not know it.** Two
+deny-all-outbound rules from an earlier session had been live for days with no
+matching allow rules, so the account had no route out at all. The registry
+meanwhile said egress was open. This document told the operator to create rules
+that already existed, under names that would have produced duplicates.
 
-The `(IPv4)` rule is `Any/Any->Any` and does cover IPv6 — the name is wrong, the
-rule is not. Do not "fix" it by narrowing it to IPv4: the 2026-07-30 baseline
-shows this machine reaching both the model host and the gate over IPv6, so an
-IPv4-only rule would be decorative.
+Those original rules — `deny all outbound (IPv4)`, which despite its name was
+`Any/Any->Any` and did cover IPv6, and `deny all outbound (UDP 443 / QUIC)` —
+were deleted during the 2026-07-30 work and **replaced** by the two in section 3.
+The replacement exists because the original pair could not coexist with a working
+DNS allow rule; see that section.
 
 **2. `-LocalUser` enforcement is verified, not assumed.** This document used to
 call it the unverified assumption the whole design rested on. It got settled
@@ -126,15 +126,26 @@ needs no privileges and no network:
 python "C:\Users\dorot\Documents\AI Projects\director-core\scripts\egress-proxy-check.py"
 ```
 
-### 3. Add the two missing allow rules
+### 3. The rules — four, and the shape matters
 
-The two deny rules already exist and must be left alone. Only these two are
-missing. Run as Administrator; the SID is read live rather than pasted, so a
-rebuilt account cannot leave a rule pointing at a principal that no longer exists.
+**Do not change the machine-wide `DefaultOutboundAction`.** It stays `Allow`.
+Setting it to `Block` denies SYSTEM and every service account that has no allow
+rule of its own, and it makes the probe unattributable: a failing direct probe
+then has two sufficient causes and proves nothing about the boundary. This was
+tried on 2026-07-30 and both problems occurred.
+
+Run as Administrator. The SID is read live rather than pasted, so a rebuilt
+account cannot leave a rule pointing at a principal that no longer exists.
 
 ```powershell
 $sid = (Get-LocalUser -Name director-exec).SID.Value
 $sddl = "D:(A;;CC;;;$sid)"
+
+New-NetFirewallRule -DisplayName "director-exec: deny TCP outbound" -Direction Outbound `
+  -Action Block -Protocol TCP -LocalUser $sddl
+
+New-NetFirewallRule -DisplayName "director-exec: deny UDP except DNS" -Direction Outbound `
+  -Action Block -Protocol UDP -RemotePort @("1-52","54-65535") -LocalUser $sddl
 
 New-NetFirewallRule -DisplayName "director-exec: allow DNS" -Direction Outbound `
   -Action Allow -Protocol UDP -RemotePort 53 -LocalUser $sddl
@@ -153,26 +164,55 @@ Get-NetFirewallRule -DisplayName "director-exec: *" | ForEach-Object {
     (Get-NetFirewallSecurityFilter -AssociatedNetFirewallRule $_).LocalUser }
 ```
 
-Notes, because each rule is load-bearing:
+Why this shape rather than the obvious one:
 
-- **DNS is permitted deliberately.** The proxy resolves names, and a probe that
-  cannot resolve produces refusals with two possible causes, which proves
-  nothing. The boundary probe checks resolution first for that reason.
-- **QUIC is denied explicitly.** UDP/443 would route around a TCP-only policy.
-  Denying it is the difference between a boundary and a speed bump.
-- **The deny rule is last but not least-priority.** Windows evaluates Block
-  before Allow at equal specificity, so verify the intended outcome with the
-  probe rather than reasoning about precedence.
+- **DNS is carved out of the Block rule, not permitted beside it.** The first
+  attempt was deny-all-outbound plus an allow rule for UDP/53. DNS still timed
+  out, with the allow rule present and enabled: **Block defeats Allow at equal
+  specificity on this build.** Expressing the exception as a port range inside
+  the Block rule removes the precedence question instead of depending on an
+  answer to it. Resolution has to work — a probe that cannot resolve produces
+  refusals with two possible causes, which is why the boundary probe checks it
+  first and aborts on failure.
+- **QUIC is denied by the same rule.** UDP/443 falls inside `54-65535` and would
+  otherwise route around a TCP-only policy. Note that the probe has never
+  *observed* this refusal; the rule is present, the traffic is unmeasured.
+- **Loopback needs no allow rule.** Windows Firewall does not filter loopback, so
+  the proxy stays reachable under a blanket TCP deny. The allow rule is kept as a
+  statement of intent; it is not what makes the proxy work.
 - **Nothing here names an internet IP range.** `127.0.0.1` is the loopback
-  address of the proxy, not an allowance for any external host. If a future
-  edit adds an internet address to any of these rules, the design has been
-  abandoned rather than adjusted.
+  address of the proxy, not an allowance for any external host. If a future edit
+  adds an internet address to any of these rules, the design has been abandoned
+  rather than adjusted.
+- **Disable, never delete.** Recovering a rule costs one command; reconstructing
+  its SDDL costs a session. On 2026-07-30 the original rules were deleted on the
+  orchestrator's advice and the account was briefly left with wider reach than it
+  had before the work started.
 
 ### 4. Prove it by attempting the forbidden action
 
-`runas` mis-parses a quoted command containing both a space and a colon, so put
-the command in a script and point `runas` at the script. Both accounts need to
-reach it, so not `%TEMP%`. In `cmd`:
+Start the proxy first (section 2) and leave its window open — it must be running
+for the whole probe.
+
+The form actually used on 2026-07-30 was a `.cmd` wrapper, which avoids the
+`runas` quoting problem entirely and is the shorter of the two. In `cmd` as
+Administrator:
+
+```
+echo @echo off > C:\Temp\run-probe.cmd
+echo set HTTP_PROXY=http://127.0.0.1:8899 >> C:\Temp\run-probe.cmd
+echo set HTTPS_PROXY=http://127.0.0.1:8899 >> C:\Temp\run-probe.cmd
+echo "C:\Program Files\Git\bin\bash.exe" -lc "cd /c/Users/dorot/Documents/AI\ Projects/director-core && bash scripts/egress-boundary-probe.sh" >> C:\Temp\run-probe.cmd
+```
+
+```
+runas /user:director-exec "C:\Temp\run-probe.cmd"
+```
+
+The `bash.exe` form below also works and writes the output to a file instead of
+the console. `runas` mis-parses a quoted command containing both a space and a
+colon, so the command goes in a script and `runas` points at the script. Both
+accounts need to reach it, so not `%TEMP%`. In `cmd`:
 
 ```
 mkdir C:\Temp
@@ -212,11 +252,16 @@ network results in separate sections, so a firewall refusal is never read as a
 credential-wrapper success. Its push is `--dry-run` against a ref name that
 exists nowhere.
 
-### 5. Record the result, then stop
+### 5. Record the result, then stop — DONE 2026-07-30
 
-Write the output to `docs/evidence/`, pass or fail, and update
-`.director/routes.yaml` to say what is now true. Two things must be recorded even
-though neither is flattering:
+Recorded in
+[`docs/evidence/egress-boundary-2026-07-30.md`](../evidence/egress-boundary-2026-07-30.md),
+with all three runs' raw output beside it including the two that failed. The
+registry now carries `egress_boundary: TCP_CLOSED_MEASURED_2026_07_30` and
+`quic_udp_443: DENIED_BY_RULE_NEVER_MEASURED`.
+
+The instructions below stand for any future re-run. Two things must be recorded
+even though neither is flattering:
 
 - **The wrapper has still not been probed against this executor.** That is
   [#32](https://github.com/Nercari/director-core/issues/32) and it is a separate

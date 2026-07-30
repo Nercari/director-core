@@ -161,9 +161,10 @@ def main() -> int:
         print("--- the case this check CANNOT decide")
         print("=== executor cannot bypass the proxy")
         print("  verdict : NOT TESTED HERE — a firewall property, not a proxy")
-        print("            property. docs/operator/egress-boundary.md, and the")
-        print("            probe that decides it needs the operator's rules")
-        print("            applied first.\n")
+        print("            property, so this check can never decide it.")
+        print("            DECIDED ELSEWHERE 2026-07-30, for TCP only:")
+        print("            docs/evidence/egress-boundary-2026-07-30.md")
+        print("            UDP/443 stays denied by rule and unmeasured.\n")
     finally:
         process.terminate()
         process.wait(timeout=10)

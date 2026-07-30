@@ -466,3 +466,92 @@ never had to be reconstructed, and re-enabling was one command. Had they been
 deleted, restoring them would have meant rebuilding the scoping by hand — the
 step most likely to produce an unscoped Block rule applying to every account on
 the machine.
+
+---
+
+## 2026-07-30 — a precedence rule asserted as fact, then used to justify a change
+
+`#31`. The boundary probe failed its own precondition: DNS timed out under
+`director-exec` while an Allow rule for UDP/53 was present and enabled.
+
+The diagnosis given was "Block rules beat Allow rules in Windows Firewall, so you
+cannot punch holes in a deny-all". That turned out to be **correct**, and it was
+**not known to be correct when it was stated**. It was asserted from general
+knowledge, in the same breath as a prescription to change security settings on
+the operator's machine.
+
+The check that would have settled it — reshape the Block rule and observe whether
+DNS survives — cost one command and was run two turns later, after the machine
+had already been reconfigured twice on the strength of the unverified claim.
+
+**This is the same shape as `estimated_cost` versus telemetry, in a place with
+worse consequences.** The registry rule is that an estimate is never called a
+measurement. Nothing extends that rule to prose delivered to an operator, and
+prose is where it did damage.
+
+## 2026-07-30 — a retraction left the machine more open than it started
+
+Same unit, same hour. The sequence:
+
+1. Advice: delete the existing `director-exec: *` rules, set the machine-wide
+   `DefaultOutboundAction` to `Block`, add an allow rule for the operator.
+2. Retraction one turn later, on blast radius: SYSTEM and service accounts have
+   no allow rule, so the machine-wide default would deny Windows Update. Correct
+   reasoning, issued with `Set-NetFirewallProfile -All -DefaultOutboundAction
+   Allow` as an immediate undo.
+3. The undo ran. The deletions from step 1 did not come back. Net state:
+   default Allow, zero Block rules, restricted account with **wider** network
+   reach than before the session began.
+
+The boundary was rebuilt within the same session, so the exposure was minutes on
+a single-operator machine. The failure is not the exposure. It is that a
+correction was issued for one hazard while silently depending on a config the
+same author had told the operator to destroy.
+
+**`docs/operator/egress-boundary.md` already contained the rule that prevents
+this** — *disable, never delete* — written for the baseline step three hours
+earlier, and it was not applied to the rule-replacement step. Second instance of
+a fix present in one place and not carried to its sibling; the first was the
+credential-prompt guards in `exec-jail.sh` never reaching `baseline-probe.sh`.
+
+Ledgered rather than turned into a rule: the existing principle covers it. What
+failed was applying it, not stating it.
+
+## 2026-07-30 — a probe reported a failure whose cause was not its own name
+
+`git-push-dry-run` in `scripts/egress-boundary-probe.sh` exited 128 with
+`Unsupported proxy syntax` and `Malformed input to a URL function`. Git for
+Windows rejected the proxy value the wrapper exported for curl's benefit, and
+died **before attempting authentication**.
+
+Under a probe named `git-push-dry-run`, in a section headed CREDENTIALS, a
+non-zero exit reads as "cannot authenticate". It measured nothing of the kind.
+The credential finding survived only because `gh auth status` and `gh api user`
+reach that answer without touching the network.
+
+Fixed: the push probe now removes the proxy variables, blanks the proxy config,
+and carries the prompt guards. Also recorded in the probe's comments and in the
+evidence file, because the run that produced the bad line is published and a
+future reader will otherwise take that exit code at face value.
+
+**Third instance of the class.** The first was `nslookup` exiting 0 on total
+resolution failure; the second was an executor exiting `SUCCESS` after every
+write was refused. Exit codes describe how a process ended, never what it
+established. Every probe in this repository prints raw output beside its exit
+code for this reason, and this entry is why that stays non-negotiable.
+
+## 2026-07-30 — what the boundary run did NOT prove, recorded at the time
+
+TCP egress from `director-exec` is closed and measured. Two things are not, and
+are written down now rather than discovered as a gap later:
+
+- **UDP/443 is denied by rule and never observed being denied.** This curl has
+  no HTTP3 support, so `direct-quic-model` has exited 127 on every run. QUIC
+  would route around a TCP-only policy, which is precisely why the rule exists;
+  "the rule exists" is not "the traffic is refused". Registry:
+  `quic_udp_443: DENIED_BY_RULE_NEVER_MEASURED`.
+- **The boundary is a property of the account, not of the tool.** The rules are
+  SID-scoped. An executor launched under the operator's account has the operator's
+  unrestricted network. The registry's `network:` field was reworded to say so,
+  because `EGRESS_OPEN` becoming `EGRESS_CLOSED` would have been read as a
+  property of the route.
