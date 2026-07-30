@@ -48,7 +48,18 @@ routes:
     # it the only available path has not been applied or probed. Do not read the
     # proxy's existence as the unblock — docs/operator/egress-boundary.md step 4 is the
     # measurement that would, and it is an operator task.
-    egress_boundary: NOT_PROVEN
+    # Corrected 2026-07-30. The value below was NOT_PROVEN and the blocked_on line
+    # above said "Egress is open". Both were wrong at the time they were written:
+    # two SID-scoped deny-all-outbound rules for the restricted account had been
+    # live since an earlier session, with no matching allow rules, so the account
+    # had no route out at all. The registry described a machine state that had not
+    # existed for days. See docs/evidence/baseline-director-exec-2026-07-30.md.
+    egress_boundary: DENY_LIVE_ALLOW_MISSING_PROBE_NOT_RUN
+    # Settled incidentally on 2026-07-30 rather than argued: the restricted account
+    # was refused every network probe in 10-16 ms while the operator's account
+    # reached the internet on the same machine, under SID-scoped rules. Windows
+    # enforces user-scoped outbound filtering for an ordinary console process here.
+    localuser_enforcement: VERIFIED_2026_07_30
     # Stated rather than omitted: the model endpoint must stay reachable, and
     # repository content can be placed in a prompt to it. The proxy reduces the
     # exfiltration surface and cannot eliminate it. No hostname allow list can.
