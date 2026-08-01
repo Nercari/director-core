@@ -43,7 +43,15 @@ if ([string]::IsNullOrWhiteSpace($OutputPath)) {
 
 if ($Login) {
     $runAsUser = if ($UserName -match "\\") { $UserName } else { "$env:COMPUTERNAME\$UserName" }
-    $loginCommand = "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -NoExit -File `"$loginRunnerPath`" -ExecutorPath `"$($executor.Source)`" -ProbePath `"$probePath`" -ExpectedUser $UserName -ExpectedSid $expectedSid -WorkingDirectory `"$repositoryPath`" -Repository `"$repositoryPath`" -ExecutorBinDirectory `"$executorBinDirectory`" -OutputPath `"$OutputPath`""
+    # runas mis-parses a long program string when quoted paths contain both
+    # spaces and drive-letter colons. Keep those paths inside an audit-friendly
+    # UTF-16LE PowerShell payload so runas sees only a short base64 argument.
+    $loginPayload = @"
+& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$loginRunnerPath`" -ExecutorPath `"$($executor.Source)`" -ProbePath `"$probePath`" -ExpectedUser $UserName -ExpectedSid $expectedSid -WorkingDirectory `"$repositoryPath`" -Repository `"$repositoryPath`" -ExecutorBinDirectory `"$executorBinDirectory`" -OutputPath `"$OutputPath`"
+exit `$LASTEXITCODE
+"@
+    $loginEncodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($loginPayload))
+    $loginCommand = "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -NoExit -EncodedCommand $loginEncodedCommand"
     $runAsPath = Join-Path $env:SystemRoot "System32\runas.exe"
     & $runAsPath "/profile" "/user:$runAsUser" $loginCommand
     exit $LASTEXITCODE
