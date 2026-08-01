@@ -126,6 +126,9 @@ expect_block "push to main"           block-dangerous-bash.sh "$(bash_cmd 'git p
 expect_block "force push"             block-dangerous-bash.sh "$(bash_cmd 'git push --force origin task/x')"
 expect_block "reset --hard"           block-dangerous-bash.sh "$(bash_cmd 'git reset --hard HEAD~3')"
 expect_block "immediate pr merge"     block-dangerous-bash.sh "$(bash_cmd 'gh pr merge 4 --squash')"
+# Replaces an expect_allow. Auto-merge is off; a silent revert of that removal
+# fails here rather than being noticed after a pull request merges itself.
+expect_block "ARM auto-merge"         block-dangerous-bash.sh "$(bash_cmd 'gh pr merge 4 --auto --squash')"
 expect_block "self-approve"           block-dangerous-bash.sh "$(bash_cmd 'gh pr review 4 --approve')"
 expect_block "API key in command"     block-dangerous-bash.sh "$(bash_cmd 'OPENAI_API_KEY=sk-x codex exec "hi"')"
 expect_block "agent with no timeout"  block-dangerous-bash.sh "$(bash_cmd 'agy -p "do the thing"')"
@@ -136,7 +139,6 @@ expect_block "claude bare"             block-dangerous-bash.sh "$(bash_cmd 'time
 echo
 echo "block-dangerous-bash — must permit"
 expect_allow "push a task branch"     block-dangerous-bash.sh "$(bash_cmd 'git push -u origin task/demo')"
-expect_allow "ARM auto-merge"         block-dangerous-bash.sh "$(bash_cmd 'gh pr merge 4 --auto --squash')"
 expect_allow "agent with timeout"     block-dangerous-bash.sh "$(bash_cmd 'timeout 900 scripts/exec-jail.sh agy -p --print-timeout 15m "do it"')"
 expect_allow "codex through jail"     block-dangerous-bash.sh "$(bash_cmd 'timeout 900 scripts/exec-jail.sh codex exec --sandbox workspace-write "do it"')"
 expect_allow "claude without jail"    block-dangerous-bash.sh "$(bash_cmd 'timeout 900 claude -p "do it"')"

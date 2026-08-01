@@ -41,16 +41,11 @@ case "$cmd" in
 esac
 
 # --- merging -----------------------------------------------------------------
-# `gh pr merge --auto` ARMS GitHub auto-merge and must be allowed. Only an
-# immediate merge is denied. Rev 10.1's hook blocked both and so blocked its
-# own auto-merge design.
+# Auto-merge was removed, so `--auto` is no longer an exception. Arming it and
+# merging immediately are the same denial: only the operator merges.
 case "$cmd" in
 *"gh pr merge"*)
-  case "$cmd" in
-  *"--auto"*) : ;;   # arming auto-merge — permitted (§9.4)
-  *) deny "gh pr merge. Only the operator merges (§13.1). '--auto' is allowed." ;;
-  esac
-  ;;
+  deny "gh pr merge. Only the operator merges (§13.1). Auto-merge is off — '--auto' is denied too." ;;
 esac
 
 case "$cmd" in

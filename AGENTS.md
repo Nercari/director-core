@@ -54,11 +54,13 @@ Never review with a model from the executor's vendor.
 
 ## Auto-merge
 
-Only `change_class: green-path`, only with every check green, only when the diff touches none of `.github/**`, `.claude/hooks/**`, `.claude/settings*.json`, `AGENTS.md`, `CLAUDE.md`, `.director/routes.yaml`, `scripts/**`.
+**Auto-merge is off.** The operator merges every pull request, by hand, after watching the behavior check. `gh pr merge --auto` is denied by `.claude/hooks/block-dangerous-bash.sh`, and the hook self-test asserts that denial.
 
-If `change_class` is ever ambiguous, it is `behavior`.
+The eligibility rules that used to sit here — green-path only, every check green, a protected-path list — lived in prose and nothing recomputed them for the commit being merged. Auto-merge was armed on four behavior-class units and correctly zero times that anyone measured. It was removed rather than verified, because the pipeline has not yet completed one work unit end to end and there is nothing to optimise.
 
-**The operator's spot-check is an intent audit, not a code review.** One question per sampled pull request: *should this have been `behavior`?*
+The deleted rules are in git history. Earning the capability back means building a deterministic eligibility check, not restoring the prose.
+
+`change_class` still declares intent in the packet. If it is ever ambiguous, it is `behavior`.
 
 ## Token accounting
 

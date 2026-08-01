@@ -142,8 +142,9 @@ routes:
 # operator judgement outranks inference. Detection is reactive: we learn we are
 # out by being refused.
 capacity_states:
-  A:  { orchestrator: ORCH_PRIMARY,  executor: EXEC_PRIMARY, layer2: cross-vendor, auto_merge: allowed }
-  B:  { orchestrator: ORCH_FALLBACK, executor: EXEC_PRIMARY, layer2: cross-vendor, auto_merge: allowed }
-  C:  { orchestrator: ORCH_PRIMARY,  executor: EXEC_STRONG,  layer2: cross-vendor, auto_merge: allowed }
+  # auto_merge is forbidden in every state: the capability was removed, not gated.
+  A:  { orchestrator: ORCH_PRIMARY,  executor: EXEC_PRIMARY, layer2: cross-vendor, auto_merge: forbidden }
+  B:  { orchestrator: ORCH_FALLBACK, executor: EXEC_PRIMARY, layer2: cross-vendor, auto_merge: forbidden }
+  C:  { orchestrator: ORCH_PRIMARY,  executor: EXEC_STRONG,  layer2: cross-vendor, auto_merge: forbidden }
   C_prime: { orchestrator: ORCH_PRIMARY, executor: DIRECT,   layer2: SELF-REVIEW,  auto_merge: forbidden }
   D:  { action: publish handoff and stop }
