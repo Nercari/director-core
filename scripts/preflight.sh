@@ -136,6 +136,40 @@ else
       esac
     done <<< "$forbidden_models"
 
+    # Declared identity versus effective identity.
+    #
+    # The registry has asserted containment it did not have three times, and
+    # twice a human caught it after merge. This is the mechanical check that
+    # makes the fourth occurrence impossible to launch rather than embarrassing
+    # to discover: a route may only claim director-exec if this session actually
+    # is director-exec, and a route claiming the operator while running as the
+    # restricted account is an equally false claim.
+    #
+    # This compares a declaration against the process's real user. It proves the
+    # identity, not the boundary — the SID-scoped firewall rules are what close
+    # egress, and they are measured separately (docs/operator/egress-boundary.md).
+    runs_as="$(echo "$block" | field runs_as)"
+    effective_user="$(id -un 2>/dev/null || echo "${USERNAME:-}")"
+    case "$runs_as" in
+      director-exec)
+        if [ "$effective_user" = "director-exec" ]; then
+          pass "$alias runs_as director-exec and the effective user is director-exec"
+        else
+          fail "$alias declares runs_as: director-exec but the effective user is '${effective_user:-<unknown>}' — the measured egress boundary does not apply to this session. Refusing to launch."
+        fi
+        ;;
+      operator)
+        if [ "$effective_user" = "director-exec" ]; then
+          fail "$alias declares runs_as: operator but the effective user is director-exec"
+        else
+          pass "$alias runs_as operator, matching effective user '${effective_user:-<unknown>}'"
+        fi
+        ;;
+      *)
+        fail "$alias has no usable runs_as (got: '${runs_as:-<empty>}'; expected operator or director-exec)"
+        ;;
+    esac
+
     case "$alias" in
       EXEC_PRIMARY | EXEC_STRONG | EXEC_LOCAL)
         quarantined="$(echo "$block" | field quarantined)"

@@ -575,20 +575,29 @@ def scenario_forbidden_paths_no_match_still_validates() -> tuple[bool, str]:
 
 
 def preflight_fixture_routes(primary_block: str) -> str:
+    # Every route must declare runs_as or preflight fails it, so the fixture
+    # supplies the operator default. A block that declares its own identity
+    # keeps it — that is how the identity scenarios below inject a claim.
+    if "runs_as:" not in primary_block:
+        primary_block = "    runs_as: operator\n" + primary_block
     return f"""routes:
   ORCH_PRIMARY:
     model: default
+    runs_as: operator
     last_verified: 2026-07-26
   ORCH_FALLBACK:
     model: default
+    runs_as: operator
     last_verified: 2026-07-26
   EXEC_PRIMARY:
 {primary_block}
   EXEC_STRONG:
     model: default
+    runs_as: operator
     last_verified: 2026-07-26
   EXEC_LOCAL:
     model: local
+    runs_as: operator
     state: absent
     last_verified: 2026-07-26
 """
@@ -669,23 +678,28 @@ def scenario_route_availability() -> tuple[bool, str]:
     routes = """routes:
   ORCH_PRIMARY:
     model: default
+    runs_as: operator
     last_verified: 2026-07-26
   ORCH_FALLBACK:
     model: default
+    runs_as: operator
     last_verified: 2026-07-26
   EXEC_PRIMARY:
     model: primary-fixture
+    runs_as: operator
     quarantined: false
     jail_verified: true
     last_verified: 2026-07-26
   EXEC_STRONG:
     model: strong-fixture
+    runs_as: operator
     invoke: scripts/exec-jail.sh strong-fixture
     quarantined: true
     jail_verified: false
     last_verified: 2026-07-26
   EXEC_LOCAL:
     model: local-fixture
+    runs_as: operator
     invoke: scripts/exec-jail.sh local-fixture
     quarantined: false
     jail_verified: true
@@ -713,24 +727,29 @@ def scenario_route_availability_gate() -> tuple[bool, str]:
     all_quarantined_routes = """routes:
   ORCH_PRIMARY:
     model: default
+    runs_as: operator
     last_verified: 2026-07-26
   ORCH_FALLBACK:
     model: default
+    runs_as: operator
     last_verified: 2026-07-26
   EXEC_PRIMARY:
     model: primary-fixture
+    runs_as: operator
     invoke: scripts/exec-jail.sh primary-fixture
     quarantined: true
     jail_verified: true
     last_verified: 2026-07-26
   EXEC_STRONG:
     model: strong-fixture
+    runs_as: operator
     invoke: scripts/exec-jail.sh strong-fixture
     quarantined: true
     jail_verified: true
     last_verified: 2026-07-26
   EXEC_LOCAL:
     model: local-fixture
+    runs_as: operator
     invoke: scripts/exec-jail.sh local-fixture
     quarantined: true
     jail_verified: true
@@ -740,12 +759,14 @@ def scenario_route_availability_gate() -> tuple[bool, str]:
     usable_strong_route = all_quarantined_routes.replace(
         """  EXEC_STRONG:
     model: strong-fixture
+    runs_as: operator
     invoke: scripts/exec-jail.sh strong-fixture
     quarantined: true
     jail_verified: true
 """,
         """  EXEC_STRONG:
     model: strong-fixture
+    runs_as: operator
     invoke: scripts/exec-jail.sh strong-fixture
     quarantined: false
     jail_verified: true
@@ -763,6 +784,62 @@ def scenario_route_availability_gate() -> tuple[bool, str]:
         if available.returncode != 0:
             return False, f"preflight rejected a registry with EXEC_STRONG usable: {available.output}"
         return True, "preflight rejects zero usable executor routes and accepts one usable route"
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
+def scenario_runs_as_claim_must_match_effective_user() -> tuple[bool, str]:
+    """A route may not claim the restricted account this session does not have.
+
+    Both directions go through the existing preflight fixture seam: the fixture
+    registry is the input and the process's real user is the comparison, so no
+    mock of the environment is introduced. The suite is not run as director-exec,
+    which is exactly the condition the claim must fail under.
+    """
+    try:
+        effective_user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
+        if effective_user == "director-exec":
+            return None, "suite is running as director-exec; the mismatch direction cannot be exercised"
+
+        claimed = run_preflight_fixture(
+            "    model: gemini-fixture\n    runs_as: director-exec\n    last_verified: 2026-07-26\n"
+        )
+        if claimed.returncode == 0:
+            return False, "preflight accepted a route claiming director-exec from another account"
+        if "EXEC_PRIMARY declares runs_as: director-exec but the effective user is" not in claimed.output:
+            return False, "preflight did not name the identity mismatch"
+
+        # The matching direction asserts a GREEN preflight, so this block also
+        # has to be a usable route — otherwise the run fails on "zero usable
+        # executor routes" and the identity check is never what decided it.
+        matching = run_preflight_fixture(
+            "    model: gemini-fixture\n"
+            "    runs_as: operator\n"
+            "    invoke: scripts/exec-jail.sh gemini-fixture\n"
+            "    quarantined: false\n"
+            "    jail_verified: true\n"
+            "    last_verified: 2026-07-26\n"
+        )
+        if matching.returncode != 0:
+            return False, f"preflight rejected a route whose declared identity matches: {matching.output}"
+        if "EXEC_PRIMARY runs_as operator, matching effective user" not in matching.output:
+            return False, "preflight did not confirm the matching identity"
+        return True, "preflight fails a director-exec claim and passes a matching operator claim"
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
+def scenario_runs_as_is_required() -> tuple[bool, str]:
+    """A route with no declared identity is not a route with a default identity."""
+    try:
+        result = run_preflight_fixture(
+            "    model: gemini-fixture\n    runs_as:\n    last_verified: 2026-07-26\n"
+        )
+        if result.returncode == 0:
+            return False, "preflight accepted a route with no declared runs_as"
+        if "EXEC_PRIMARY has no usable runs_as" not in result.output:
+            return False, "preflight did not name the missing identity declaration"
+        return True, "preflight rejects a route that declares no identity"
     except Exception as error:
         return False, f"fixture could not be built or exercised: {error}"
 
@@ -966,6 +1043,8 @@ def main() -> int:
         scenario_forbidden_paths_deny_before_allow(),
         scenario_forbidden_paths_ambiguous_declaration(),
         scenario_forbidden_paths_no_match_still_validates(),
+        scenario_runs_as_claim_must_match_effective_user(),
+        scenario_runs_as_is_required(),
     )
     all_passed = True
     for index, (passed, reason) in enumerate(outcomes, 1):

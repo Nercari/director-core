@@ -1,6 +1,14 @@
 # The ONLY file in this project naming a provider, model, quota, or price.
 # Filled from what the CLIs reported on 2026-07-25 (blueprint §7.2, §7.3).
 # preflight refuses to launch on an unresolved alias or a stale entry.
+#
+# runs_as: the account the route executes under. Two values:
+#   operator      — the invoking account, with the operator's unrestricted network.
+#   director-exec — the restricted account the measured egress boundary applies to.
+# preflight compares this against the effective user and fails the route when they
+# disagree. A route claiming director-exec must prove it or preflight refuses to
+# launch. This exists because the registry has asserted containment it did not have
+# three times, and twice a human caught it after merge.
 
 routes:
   ORCH_PRIMARY:
@@ -8,6 +16,7 @@ routes:
     version_seen: 2.1.220
     auth: subscription          # Claude Pro, OAuth
     model: default              # harness-selected; the swap drill governs changes
+    runs_as: operator
     note: the only route with hooks
     last_verified: 2026-07-26
 
@@ -16,6 +25,7 @@ routes:
     version_seen: 0.145.0
     auth: subscription          # "Logged in using ChatGPT"
     model: default
+    runs_as: operator
     enforcement: reduced        # no hooks — treat every change as behavior-changing
     forbidden_models:
       - "gpt-oss-*"
@@ -26,6 +36,9 @@ routes:
     version_seen: 1.1.8
     auth: subscription          # Google AI Pro, OAuth
     model: gemini-3.6-flash-medium
+    # Not director-exec. exec-jail.sh does not switch accounts, so this route
+    # would run with the operator's unrestricted network if it were unquarantined.
+    runs_as: operator
     # Historical evidence from 2026-07-26, superseded by the 2026-07-28 probe.
     # There is deliberately no runnable invoke: key while the route is quarantined.
     invoke_historical_2026_07_26_do_not_use: "scripts/exec-jail.sh agy -p --sandbox --mode accept-edits --print-timeout 15m"
@@ -106,6 +119,12 @@ routes:
     version_seen: 0.145.0
     auth: subscription
     model: default
+    # Corrected 2026-07-30 — see AGENTS.md §2b. This route runs every unit, and
+    # until now it was described less accurately than the quarantined one.
+    # exec-jail.sh strips gate credentials; it does not switch accounts. So this
+    # route executes under the operator and the measured director-exec egress
+    # boundary does not apply to it.
+    runs_as: operator
     invoke: scripts/exec-jail.sh codex exec --sandbox workspace-write --json
     # This contract has optional fields by design, but structured output requires every
     # property to be required. Closed properties and validate-result.sh still reject forbidden keys.
@@ -115,17 +134,22 @@ routes:
     #   gh api user           exit 0  (live authenticated API, repo+workflow)
     # git ls-remote failed only on a schannel credential error, not a network
     # block. Seven units ran on this route on 2026-07-25 with the gate reachable.
+    # EGRESS_OPEN is a property of the ACCOUNT, not of the route. The SID-scoped
+    # deny rules cover director-exec, and runs_as above says this is not that
+    # account. TCP egress from director-exec is closed and measured; UDP/443 is
+    # denied by rule and never observed being denied. Neither fact applies here.
     network: EGRESS_OPEN
     gate_credentials: REMOVED_BY_EXEC_JAIL
     quarantined: false                   # gate closed 2026-07-26 via exec-jail
-    enforcement: "Same control as EXEC_PRIMARY. Verified in a live jailed run: gh unauthenticated, gh api refused, push cannot authenticate."
-    residual_risk: "Egress open. See blueprint 21.8."
+    enforcement: "Same control as EXEC_PRIMARY: credential removal, not account isolation. Verified in a live jailed run: gh unauthenticated, gh api refused, push cannot authenticate. The jail does not constrain the network."
+    residual_risk: "Egress open, because this route runs as the operator. An executor here can fetch and could exfiltrate. Closing it means running as director-exec — issue #59 — not tightening the jail."
     use: "DE FACTO PRIMARY as of 2026-07-26. Eleven units have run here; zero on EXEC_PRIMARY. EXEC_PRIMARY remains quarantined because egress is open and its jail has not been probed. Escalation semantics are retained for when EXEC_PRIMARY becomes usable."
     jail_verified: true                  # probed live 2026-07-26: gh dead, push cannot authenticate
     last_verified: 2026-07-26
 
   EXEC_LOCAL:
     tool: lmstudio
+    runs_as: operator
     auth: local
     model: gemma-4-12b-agentic-fable5-composer2.5-v2-3.5x-tau2
     quant: Q4_K_M
