@@ -76,7 +76,8 @@ it as evidence. In particular, confirm `identity.user` is `director-exec`,
 not promoted by editing its status.
 
 If `tools.executor.login.authenticated` is false, start the dedicated account's
-official browser login with the same wrapper and then rerun the evidence probe:
+official browser login with the same wrapper. After a successful browser login,
+it automatically runs the evidence probe:
 
 ```powershell
 .\scripts\run-restricted-account-probe.ps1 -Login

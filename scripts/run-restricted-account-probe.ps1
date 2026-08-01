@@ -19,6 +19,7 @@ $account = Get-LocalUser -Name $UserName -ErrorAction Stop
 $expectedSid = [string]$account.SID.Value
 $probePath = Join-Path $repositoryPath "scripts\restricted-account-probe.ps1"
 $launcherPath = Join-Path $PSScriptRoot "exec-as-account.ps1"
+$loginRunnerPath = Join-Path $PSScriptRoot "login-and-run-restricted-probe.ps1"
 $executor = Get-Command -Name "codex" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandType -in @("Application", "ExternalScript") } |
     Select-Object -First 1
@@ -32,15 +33,20 @@ if (-not (Test-Path -LiteralPath $probePath -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $launcherPath -PathType Leaf)) {
     throw "account launcher is missing: $launcherPath"
 }
-
-if ($Login) {
-    & $launcherPath -UserName $UserName -FilePath ([string]$executor.Source) -ArgumentList "login --device-auth" -WorkingDirectory $repositoryPath -Interactive
-    exit $LASTEXITCODE
+if (-not (Test-Path -LiteralPath $loginRunnerPath -PathType Leaf)) {
+    throw "login-and-probe runner is missing: $loginRunnerPath"
 }
 
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
     $OutputPath = Join-Path $repositoryPath ".director\evidence\restricted-account-probe.json"
 }
+
+if ($Login) {
+    $loginArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$loginRunnerPath`" -ExecutorPath `"$($executor.Source)`" -ProbePath `"$probePath`" -ExpectedUser $UserName -ExpectedSid $expectedSid -WorkingDirectory `"$repositoryPath`" -Repository `"$repositoryPath`" -ExecutorBinDirectory `"$executorBinDirectory`" -OutputPath `"$OutputPath`""
+    & $launcherPath -UserName $UserName -FilePath "powershell.exe" -ArgumentList $loginArgs -WorkingDirectory $repositoryPath -Interactive
+    exit $LASTEXITCODE
+}
+
 $probeArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$probePath`" -ExpectedUser $UserName -ExpectedSid $expectedSid -WorkingDirectory `"$repositoryPath`" -Repository `"$repositoryPath`" -ExecutorBinDirectory `"$executorBinDirectory`" -OutputPath `"$OutputPath`""
 & $launcherPath -UserName $UserName -FilePath "powershell.exe" -ArgumentList $probeArgs -WorkingDirectory $repositoryPath
 exit $LASTEXITCODE
