@@ -75,6 +75,16 @@ it as evidence. In particular, confirm `identity.user` is `director-exec`,
 `git_push_dry_run.credential_refused` is true. A failed or incomplete report is
 not promoted by editing its status.
 
+If `tools.executor.login.authenticated` is false, start the dedicated account's
+official browser login with the same wrapper and then rerun the evidence probe:
+
+```powershell
+.\scripts\run-restricted-account-probe.ps1 -Login
+```
+
+This opens the login flow as `director-exec`; it does not reuse the calling
+account's login or ask for a token in the command line.
+
 The launcher is intentionally not a route. It is an operator-side mechanism
 for obtaining the observation that the route registry currently lacks. Do not
 change `EXEC_STRONG.runs_as` from `operator` until a real run has recorded the

@@ -2,7 +2,8 @@
 param(
     [string]$Repository,
     [string]$OutputPath,
-    [string]$UserName = "director-exec"
+    [string]$UserName = "director-exec",
+    [switch]$Login
 )
 
 Set-StrictMode -Version Latest
@@ -30,6 +31,11 @@ if (-not (Test-Path -LiteralPath $probePath -PathType Leaf)) {
 }
 if (-not (Test-Path -LiteralPath $launcherPath -PathType Leaf)) {
     throw "account launcher is missing: $launcherPath"
+}
+
+if ($Login) {
+    & $launcherPath -UserName $UserName -FilePath ([string]$executor.Source) -ArgumentList "login --device-auth" -WorkingDirectory $repositoryPath -Interactive
+    exit $LASTEXITCODE
 }
 
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {

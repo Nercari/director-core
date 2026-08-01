@@ -3,7 +3,8 @@ param(
     [string]$UserName = "director-exec",
     [Parameter(Mandatory = $true)][string]$FilePath,
     [string]$ArgumentList = "",
-    [string]$WorkingDirectory = (Get-Location).Path
+    [string]$WorkingDirectory = (Get-Location).Path,
+    [switch]$Interactive
 )
 
 Set-StrictMode -Version Latest
@@ -71,22 +72,24 @@ try {
         ArgumentList = $ArgumentList
         WorkingDirectory = $WorkingDirectory
         Credential = $credential
-        RedirectStandardOutput = $stdoutPath
-        RedirectStandardError = $stderrPath
         Wait = $true
         PassThru = $true
+    }
+    if (-not $Interactive) {
+        $startParameters.RedirectStandardOutput = $stdoutPath
+        $startParameters.RedirectStandardError = $stderrPath
     }
     if ((Get-Command -Name Start-Process).Parameters.ContainsKey("LoadUserProfile")) {
         $startParameters.LoadUserProfile = $true
     }
     $child = Start-Process @startParameters
-    if (Test-Path -LiteralPath $stdoutPath) {
+    if (-not $Interactive -and (Test-Path -LiteralPath $stdoutPath)) {
         $output = Get-Content -LiteralPath $stdoutPath -Raw
         if (-not [string]::IsNullOrWhiteSpace($output)) {
             Write-Output (Redact-Text $output).TrimEnd()
         }
     }
-    if (Test-Path -LiteralPath $stderrPath) {
+    if (-not $Interactive -and (Test-Path -LiteralPath $stderrPath)) {
         $errorOutput = Get-Content -LiteralPath $stderrPath -Raw
         if (-not [string]::IsNullOrWhiteSpace($errorOutput)) {
             [Console]::Error.WriteLine((Redact-Text $errorOutput).TrimEnd())
