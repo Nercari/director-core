@@ -78,6 +78,8 @@ try {
     if (-not $Interactive) {
         $startParameters.RedirectStandardOutput = $stdoutPath
         $startParameters.RedirectStandardError = $stderrPath
+    } else {
+        $startParameters.WindowStyle = "Normal"
     }
     if ((Get-Command -Name Start-Process).Parameters.ContainsKey("LoadUserProfile")) {
         $startParameters.LoadUserProfile = $true
@@ -94,6 +96,9 @@ try {
         if (-not [string]::IsNullOrWhiteSpace($errorOutput)) {
             [Console]::Error.WriteLine((Redact-Text $errorOutput).TrimEnd())
         }
+    }
+    if ($Interactive) {
+        Write-Output ("Interactive restricted-account process exited with code " + [int]$child.ExitCode + ".")
     }
     exit ([int]$child.ExitCode)
 } finally {
