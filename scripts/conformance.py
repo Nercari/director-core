@@ -574,6 +574,65 @@ def scenario_forbidden_paths_no_match_still_validates() -> tuple[bool, str]:
         return False, f"fixture could not be built or exercised: {error}"
 
 
+def scenario_required_tests_take_no_shell() -> tuple[bool, str]:
+    """Metacharacters in a required test are arguments, not a second command."""
+    try:
+        with ValidatorFixture("required-tests-no-shell") as fixture:
+            fixture.modify_files({"allowed.txt": "in scope\n"})
+            side_effect = fixture.worktree / "SIDE-EFFECT.txt"
+            payload = f"python --version; touch {side_effect.name}"
+            fixture.write_packet(["allowed.txt"], [payload])
+            fixture.write_result([payload])
+            passed, reason = expect_validator_reject(fixture, "re-run FAILED:")
+            if not passed:
+                return False, reason
+            if side_effect.exists():
+                return False, "the metacharacter payload's side effect occurred"
+        return True, "a metacharacter payload fails and produces no side effect"
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
+def scenario_required_tests_are_bounded() -> tuple[bool, str]:
+    """A test that outruns the bound fails the unit instead of hanging the gate."""
+    previous = os.environ.get("DIRECTOR_TEST_TIMEOUT")
+    os.environ["DIRECTOR_TEST_TIMEOUT"] = "2"
+    try:
+        with ValidatorFixture("required-tests-bounded") as fixture:
+            fixture.modify_files({"allowed.txt": "in scope\n"})
+            # No shell, so the -c source has to survive whitespace splitting as
+            # a single token. Nothing interprets the quotes or the parentheses.
+            slow = "python -c __import__('time').sleep(30)"
+            fixture.write_packet(["allowed.txt"], [slow])
+            fixture.write_result([slow])
+            return expect_validator_reject(fixture, "re-run TIMED OUT after 2s:")
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+    finally:
+        if previous is None:
+            os.environ.pop("DIRECTOR_TEST_TIMEOUT", None)
+        else:
+            os.environ["DIRECTOR_TEST_TIMEOUT"] = previous
+
+
+def scenario_required_tests_ordinary_entries_pass() -> tuple[bool, str]:
+    """The two-token shape every packet actually uses still runs and passes."""
+    try:
+        with ValidatorFixture("required-tests-ordinary") as fixture:
+            fixture.modify_files({"allowed.txt": "in scope\n"})
+            fixture.write_packet(["allowed.txt"], ["python --version"])
+            fixture.write_result(["python --version"])
+            passed, reason = expect_validator_accept(fixture, "re-ran: python --version")
+            if not passed:
+                return False, reason
+            evidence = list((fixture.run_directory / "evidence").glob("*.log"))
+            if not evidence:
+                return False, "raw per-test output was not preserved as evidence"
+        return True, "an ordinary two-token entry runs, passes, and leaves its raw output"
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
 def preflight_fixture_routes(primary_block: str) -> str:
     # Every route must declare runs_as or preflight fails it, so the fixture
     # supplies the operator default. A block that declares its own identity
@@ -1045,6 +1104,9 @@ def main() -> int:
         scenario_forbidden_paths_no_match_still_validates(),
         scenario_runs_as_claim_must_match_effective_user(),
         scenario_runs_as_is_required(),
+        scenario_required_tests_take_no_shell(),
+        scenario_required_tests_are_bounded(),
+        scenario_required_tests_ordinary_entries_pass(),
     )
     all_passed = True
     for index, (passed, reason) in enumerate(outcomes, 1):

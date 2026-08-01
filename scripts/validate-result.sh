@@ -15,6 +15,12 @@ RESULT="$RUN/result.json"
 PACKET="$RUN/packet.yaml"
 FAIL=0
 
+# A fixed outer bound on every re-run test. Non-negotiable rule 4 says every
+# agent call carries a timeout; this is that rule's enforcement point in the
+# gate rather than only in prose. Overridable so the conformance suite can
+# exercise the timeout path in seconds instead of a quarter of an hour.
+TEST_TIMEOUT="${DIRECTOR_TEST_TIMEOUT:-900}"
+
 pass() { printf '  [ OK ]  %s\n' "$1"; }
 fail() { printf '  [FAIL]  %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
@@ -247,16 +253,48 @@ if [ -n "$declared" ]; then
     echo "  ....    re-running required tests independently"
     mkdir -p "$RUN/evidence"
     trouble=0
-    while IFS= read -r cmd; do
-      [ -z "$cmd" ] && continue
-      log="$RUN/evidence/$(echo "$cmd" | tr -c 'a-zA-Z0-9' '_' | cut -c1-60).log"
-      if (cd "$WT" && eval "$cmd") > "$log" 2>&1; then
-        pass "re-ran: $cmd"
-      else
-        fail "re-run FAILED: $cmd (see $log)"
-        trouble=1
-      fi
-    done <<< "$declared"
+    # No shell. Each entry is split on whitespace into an argument vector and
+    # executed directly, so a packet field cannot become a second command. The
+    # packet is composed from material that includes externally authored issue
+    # text, and the word "test" never constrained what the string did.
+    #
+    # An entry carrying metacharacters therefore becomes one command with
+    # literal arguments: `python x.py; touch owned` runs python with the
+    # arguments `x.py;`, `touch`, `owned`. It fails, and the side effect the
+    # metacharacters were reaching for does not happen.
+    #
+    # Every entry written to date is two tokens — an interpreter and a script.
+    # The entry shape in the contract is unchanged; nothing here needs more.
+    #
+    # KNOWN CEILING: timeout terminates the direct child, not a process tree.
+    # A test that spawns a background process leaves it running on Windows.
+    # Named, not fixed — closing it is out of scope.
+    if ! command -v timeout >/dev/null 2>&1; then
+      fail "timeout is not available — refusing to re-run tests unbounded (rule 4) — REJECT"
+      trouble=1
+    else
+      while IFS= read -r cmd; do
+        [ -z "$cmd" ] && continue
+        log="$RUN/evidence/$(echo "$cmd" | tr -c 'a-zA-Z0-9' '_' | cut -c1-60).log"
+        # Word splitting is the whole mechanism: no globbing, no expansion, no
+        # quote handling. Any of those would reintroduce what this removed.
+        read -r -a argv <<< "$cmd"
+        if [ "${#argv[@]}" -eq 0 ]; then
+          continue
+        fi
+        (cd "$WT" && timeout "$TEST_TIMEOUT" "${argv[@]}") > "$log" 2>&1
+        test_status=$?
+        if [ "$test_status" -eq 0 ]; then
+          pass "re-ran: $cmd"
+        elif [ "$test_status" -eq 124 ]; then
+          fail "re-run TIMED OUT after ${TEST_TIMEOUT}s: $cmd (see $log)"
+          trouble=1
+        else
+          fail "re-run FAILED: $cmd (see $log)"
+          trouble=1
+        fi
+      done <<< "$declared"
+    fi
     [ "$trouble" -eq 0 ] && pass "raw output preserved in $RUN/evidence/"
   fi
 fi
