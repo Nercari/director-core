@@ -27,6 +27,8 @@ WORKTREE_SOURCE = ROOT / "scripts" / "worktree.sh"
 PREFLIGHT_SOURCE = ROOT / "scripts" / "preflight.sh"
 JAIL = ROOT / "scripts" / "exec-jail.sh"
 BASH = shutil.which("bash")
+POWERSHELL = shutil.which("powershell.exe") or shutil.which("powershell")
+RESTRICTED_ACCOUNT_PROBE = ROOT / "scripts" / "restricted-account-probe.ps1"
 
 
 @dataclass
@@ -1061,6 +1063,47 @@ def scenario_five() -> tuple[Optional[bool], str]:
     return True, "gate capability absent; unjailed baseline authenticated; egress remains open (documented residual)"
 
 
+def scenario_restricted_account_probe_self_test() -> tuple[Optional[bool], str]:
+    """Verify the local #59 probe mechanics without claiming account proof."""
+    if POWERSHELL is None:
+        return None, "SKIPPED: PowerShell is required for the restricted-account probe self-test"
+    if not RESTRICTED_ACCOUNT_PROBE.is_file():
+        return False, "required scripts/restricted-account-probe.ps1 is missing"
+    try:
+        result = run(
+            [
+                POWERSHELL,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(RESTRICTED_ACCOUNT_PROBE),
+                "-SelfTest",
+            ],
+            ROOT,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return False, f"restricted-account probe self-test could not run: {error}"
+    required = (
+        "self-test: redaction OK",
+        "self-test: identity guard OK",
+        "self-test: SID guard OK",
+        "self-test: engine ",
+        "self-test: credential refusal guard OK",
+        "self-test: GH config isolation OK",
+        "self-test: smoke helper OK",
+        "self-test: does not establish director-exec",
+        "restricted-account-probe self-test PASSED",
+    )
+    missing = [marker for marker in required if marker not in result.output]
+    if result.returncode != 0 or missing:
+        detail = f"exit {result.returncode}"
+        if missing:
+            detail += "; missing: " + ", ".join(missing)
+        return False, detail
+    return True, "#59 probe self-test passed; it explicitly does not establish director-exec"
+
+
 def report(number: int, passed: Optional[bool], reason: str) -> bool:
     """Print one scenario outcome and report whether it blocks the suite.
 
@@ -1107,6 +1150,7 @@ def main() -> int:
         scenario_required_tests_are_bounded(),
         scenario_required_tests_ordinary_entries_pass(),
         scenario_removed_route_is_not_authorised(),
+        scenario_restricted_account_probe_self_test(),
     )
     all_passed = True
     for index, (passed, reason) in enumerate(outcomes, 1):

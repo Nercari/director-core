@@ -142,6 +142,11 @@ routes:
     # route executes under the operator and the measured director-exec egress
     # boundary does not apply to it.
     runs_as: operator
+    # Issue #59 adds an operator-owned launcher and structured identity probe.
+    # These are mechanisms for obtaining real evidence; neither changes the
+    # route's account claim before an observed director-exec run is reviewed.
+    account_launcher: scripts/exec-as-account.ps1
+    identity_probe: scripts/restricted-account-probe.ps1
     # The model and effort are named on the command line, not inherited. An
     # invocation that relied on the operator's global config would silently
     # change model whenever that file changed, and the handoff would still
