@@ -42,8 +42,10 @@ if ([string]::IsNullOrWhiteSpace($OutputPath)) {
 }
 
 if ($Login) {
-    $loginArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$loginRunnerPath`" -ExecutorPath `"$($executor.Source)`" -ProbePath `"$probePath`" -ExpectedUser $UserName -ExpectedSid $expectedSid -WorkingDirectory `"$repositoryPath`" -Repository `"$repositoryPath`" -ExecutorBinDirectory `"$executorBinDirectory`" -OutputPath `"$OutputPath`""
-    & $launcherPath -UserName $UserName -FilePath "powershell.exe" -ArgumentList $loginArgs -WorkingDirectory $repositoryPath -Interactive
+    $runAsUser = if ($UserName -match "\\") { $UserName } else { "$env:COMPUTERNAME\$UserName" }
+    $loginCommand = "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -NoExit -File `"$loginRunnerPath`" -ExecutorPath `"$($executor.Source)`" -ProbePath `"$probePath`" -ExpectedUser $UserName -ExpectedSid $expectedSid -WorkingDirectory `"$repositoryPath`" -Repository `"$repositoryPath`" -ExecutorBinDirectory `"$executorBinDirectory`" -OutputPath `"$OutputPath`""
+    $runAsPath = Join-Path $env:SystemRoot "System32\runas.exe"
+    & $runAsPath "/user:$runAsUser" "/profile" $loginCommand
     exit $LASTEXITCODE
 }
 
