@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Repository = (Get-Location).Path,
+    [string]$Repository,
     [string]$OutputPath,
     [string]$UserName = "director-exec"
 )
@@ -8,6 +8,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+if ([string]::IsNullOrWhiteSpace($Repository)) {
+    # Resolve the checkout from this wrapper's location, not the caller's cwd.
+    # This keeps the one-step command safe to invoke from C:\Windows\System32.
+    $Repository = Join-Path $PSScriptRoot ".."
+}
 $repositoryPath = (Resolve-Path -LiteralPath $Repository -ErrorAction Stop).Path
 $account = Get-LocalUser -Name $UserName -ErrorAction Stop
 $expectedSid = [string]$account.SID.Value
