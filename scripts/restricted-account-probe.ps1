@@ -380,12 +380,23 @@ function Invoke-SmokeTask {
         $result.error = Redact-Text ([string]$_)
     } finally {
         if (Test-Path -LiteralPath $artifact -PathType Leaf) {
-            try {
-                Remove-Item -LiteralPath $artifact -Force -ErrorAction Stop
-                $result.artifact_removed = $true
-            } catch {
-                $result.artifact_removed = $false
-                $cleanupError = "smoke artifact cleanup failed: " + (Redact-Text ([string]$_))
+            $cleanupError = ""
+            foreach ($attempt in 1..3) {
+                try {
+                    Remove-Item -LiteralPath $artifact -Force -ErrorAction Stop
+                    if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
+                        $result.artifact_removed = $true
+                        break
+                    }
+                } catch {
+                    $cleanupError = Redact-Text ([string]$_)
+                }
+                if ($attempt -lt 3) {
+                    Start-Sleep -Milliseconds 150
+                }
+            }
+            if (-not $result.artifact_removed) {
+                $cleanupError = "smoke artifact cleanup failed after 3 attempts: " + $cleanupError
                 $result.error = if ([string]::IsNullOrWhiteSpace($result.error)) {
                     $cleanupError
                 } else {
