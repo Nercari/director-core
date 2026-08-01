@@ -118,14 +118,30 @@ routes:
     tool: codex
     version_seen: 0.145.0
     auth: subscription
-    model: default
+    # Pinned 2026-08-01 at the operator's direction. Was `default`, which resolved
+    # to whatever ~/.codex/config.toml happened to say — a route whose model is a
+    # property of another file's current contents is not a declared model.
+    # Confirmed present in the CLI's own model list on 2026-08-01.
+    model: gpt-5.6-luna
+    reasoning_effort: max
+    # What was actually established on 2026-08-01: the id appears in the CLI's own
+    # model list, and a live jailed run with `-m gpt-5.6-luna` was accepted and
+    # completed a turn. What was NOT established: that the served model is that
+    # model. Asked to name itself, it answered "gpt-5". A self-report is not
+    # evidence — same rule as an executor's exit code (§8.3). No route claims
+    # model_identity_verified, and this one does not either.
+    model_identity_verified: false
     # Corrected 2026-07-30 — see AGENTS.md §2b. This route runs every unit, and
     # until now it was described less accurately than the quarantined one.
     # exec-jail.sh strips gate credentials; it does not switch accounts. So this
     # route executes under the operator and the measured director-exec egress
     # boundary does not apply to it.
     runs_as: operator
-    invoke: scripts/exec-jail.sh codex exec --sandbox workspace-write --json
+    # The model and effort are named on the command line, not inherited. An
+    # invocation that relied on the operator's global config would silently
+    # change model whenever that file changed, and the handoff would still
+    # claim this route's declared one.
+    invoke: scripts/exec-jail.sh codex exec --sandbox workspace-write --json -m gpt-5.6-luna -c model_reasoning_effort=max
     # This contract has optional fields by design, but structured output requires every
     # property to be required. Closed properties and validate-result.sh still reject forbidden keys.
     # CORRECTED 2026-07-26. Probed directly under --sandbox workspace-write:
@@ -145,7 +161,7 @@ routes:
     residual_risk: "Egress open, because this route runs as the operator. An executor here can fetch and could exfiltrate. Closing it means running as director-exec — issue #59 — not tightening the jail."
     use: "DE FACTO PRIMARY as of 2026-07-26. Eleven units have run here; zero on EXEC_PRIMARY. EXEC_PRIMARY remains quarantined because egress is open and its jail has not been probed. Escalation semantics are retained for when EXEC_PRIMARY becomes usable."
     jail_verified: true                  # probed live 2026-07-26: gh dead, push cannot authenticate
-    last_verified: 2026-07-26
+    last_verified: 2026-08-01
 
 # EXEC_LOCAL was removed 2026-08-01. It had state: absent, had never run a unit,
 # was blocked by four unmet conditions, and was still named in the gate's list of
