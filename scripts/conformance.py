@@ -130,13 +130,22 @@ class ValidatorFixture:
         for relative_path, content in files.items():
             write_text(self.worktree / relative_path, content)
 
-    def write_packet(self, allowed_paths: Iterable[str], required_tests: Iterable[str]) -> None:
+    def write_packet(
+        self,
+        allowed_paths: Iterable[str],
+        required_tests: Iterable[str],
+        forbidden_paths: Iterable[str] = (),
+    ) -> None:
         allowed = list(allowed_paths)
         tests = list(required_tests)
+        forbidden = list(forbidden_paths)
         if not allowed:
             raise RuntimeError("fixture packet requires declared paths")
         packet = ["allowed_paths:"]
         packet.extend(f"  - {path}" for path in allowed)
+        if forbidden:
+            packet.append("forbidden_paths:")
+            packet.extend(f"  - {path}" for path in forbidden)
         packet.append("required_tests:")
         packet.extend(f"  - {test}" for test in tests)
         write_text(self.run_directory / "packet.yaml", "\n".join(packet) + "\n")
@@ -511,6 +520,56 @@ def scenario_result_route_used_closed_enum() -> tuple[bool, str]:
                 if not passed:
                     return False, f"{unit}: {reason}"
         return True, "route_used rejects tool and accepts EXEC_STRONG"
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
+def scenario_forbidden_paths_deny_before_allow() -> tuple[bool, str]:
+    """A deny glob beats an allow glob that also matches the same file."""
+    try:
+        with ValidatorFixture("deny-beats-allow") as fixture:
+            fixture.modify_files({"scripts/gate.sh": "executor edited the gate\n"})
+            fixture.write_packet(["scripts/*"], [], forbidden_paths=["scripts/gate.sh"])
+            fixture.write_result([])
+            passed, reason = expect_validator_reject(
+                fixture, "files changed inside forbidden_paths — REJECT:"
+            )
+            if not passed:
+                return False, reason
+            output = fixture.validate().output
+            if "scripts/gate.sh (matched forbidden_paths glob: scripts/gate.sh)" not in output:
+                return False, "rejection did not name the path and the deny glob that matched it"
+        return True, "a path matching both lists is denied, and the matching glob is named"
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
+def scenario_forbidden_paths_ambiguous_declaration() -> tuple[bool, str]:
+    """The same glob in both lists is rejected, not resolved in either direction."""
+    try:
+        with ValidatorFixture("ambiguous-scope") as fixture:
+            fixture.modify_files({"allowed.txt": "in scope by one reading\n"})
+            fixture.write_packet(["allowed.txt"], [], forbidden_paths=["allowed.txt"])
+            fixture.write_result([])
+            return expect_validator_reject(
+                fixture,
+                "ambiguous scope declaration — the same path is in both allowed_paths "
+                "and forbidden_paths — REJECT:",
+            )
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
+def scenario_forbidden_paths_no_match_still_validates() -> tuple[bool, str]:
+    """A deny list that matches nothing must not narrow an otherwise valid unit."""
+    try:
+        with ValidatorFixture("deny-list-unmatched") as fixture:
+            fixture.modify_files({"allowed.txt": "ordinary in-scope change\n"})
+            fixture.write_packet(["allowed.txt"], [], forbidden_paths=[".github/*"])
+            fixture.write_result([])
+            return expect_validator_accept(
+                fixture, "all changed files within declared paths and outside forbidden_paths"
+            )
     except Exception as error:
         return False, f"fixture could not be built or exercised: {error}"
 
@@ -904,6 +963,9 @@ def main() -> int:
         scenario_blocked_states_what_it_hit(),
         scenario_route_availability(),
         scenario_route_availability_gate(),
+        scenario_forbidden_paths_deny_before_allow(),
+        scenario_forbidden_paths_ambiguous_declaration(),
+        scenario_forbidden_paths_no_match_still_validates(),
     )
     all_passed = True
     for index, (passed, reason) in enumerate(outcomes, 1):

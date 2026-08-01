@@ -139,12 +139,48 @@ if [ -f "$PACKET" ] && [ "$base_valid" -eq 1 ]; then
     } | sort -u
   )"
   allowed="$(sed -n '/^allowed_paths:/,/^[a-z_]*:/p' "$PACKET" | sed -n 's/^ *- *//p')"
+  # The packet is the single declaration of scope. Nothing is denied by default
+  # here and nothing is hardcoded: an empty forbidden_paths means no deny stage.
+  forbidden="$(sed -n '/^forbidden_paths:/,/^[a-z_]*:/p' "$PACKET" | sed -n 's/^ *- *//p')"
+
+  # A glob in both lists is not a conflict to resolve — it is a scope declaration
+  # that does not say what it permits. Resolving it either way invents an intent
+  # the packet never expressed, and resolving it permissively is the failure this
+  # deny stage exists to prevent.
+  ambiguous=""
+  while IFS= read -r deny_glob; do
+    [ -z "$deny_glob" ] && continue
+    while IFS= read -r allow_glob; do
+      [ -z "$allow_glob" ] && continue
+      [ "$deny_glob" = "$allow_glob" ] && ambiguous="$ambiguous$deny_glob"$'\n'
+    done <<< "$allowed"
+  done <<< "$forbidden"
+  if [ -n "$ambiguous" ]; then
+    fail "ambiguous scope declaration — the same path is in both allowed_paths and forbidden_paths — REJECT:"
+    # shellcheck disable=SC2086  # intentional word splitting, one path per line
+    printf '            %s\n' $ambiguous
+  fi
+
   if [ -z "$allowed" ]; then
     fail "packet declares no allowed_paths — REJECT. An undeclared scope is not an unlimited scope."
-  else
+  elif [ -z "$ambiguous" ]; then
+    # Deny before allow. A changed path matching any forbidden glob is rejected
+    # whatever allowed_paths says, so granting scope on one file can never grant
+    # scope on a file the packet explicitly withheld.
+    denied=""
     outside=""
     while IFS= read -r f; do
       [ -z "$f" ] && continue
+      hit=""
+      while IFS= read -r glob; do
+        [ -z "$glob" ] && continue
+        # shellcheck disable=SC2254
+        case "$f" in $glob) hit="$glob"; break ;; esac
+      done <<< "$forbidden"
+      if [ -n "$hit" ]; then
+        denied="$denied$f (matched forbidden_paths glob: $hit)"$'\n'
+        continue
+      fi
       ok=0
       while IFS= read -r glob; do
         [ -z "$glob" ] && continue
@@ -153,12 +189,24 @@ if [ -f "$PACKET" ] && [ "$base_valid" -eq 1 ]; then
       done <<< "$allowed"
       [ "$ok" -eq 0 ] && outside="$outside$f"$'\n'
     done <<< "$changed"
+    if [ -n "$denied" ]; then
+      fail "files changed inside forbidden_paths — REJECT:"
+      # The glob is named beside the path so the operator can tell a scope
+      # violation from a validator bug without re-deriving the match. Printed a
+      # line at a time: the reason text contains spaces, so the word-splitting
+      # form used for bare paths below would shred it.
+      while IFS= read -r denied_line; do
+        [ -z "$denied_line" ] && continue
+        printf '            %s\n' "$denied_line"
+      done <<< "$denied"
+    fi
     if [ -n "$outside" ]; then
       fail "files changed outside declared paths — REJECT:"
       # shellcheck disable=SC2086  # intentional word splitting, one path per line
       printf '            %s\n' $outside
-    else
-      pass "all changed files within declared paths"
+    fi
+    if [ -z "$denied" ] && [ -z "$outside" ]; then
+      pass "all changed files within declared paths and outside forbidden_paths"
     fi
   fi
 fi
