@@ -12,7 +12,8 @@
     "objective",
     "repository_state",
     "decisions_taken",
-    "next_action"
+    "next_action",
+    "layer2"
   ],
   "properties": {
     "published_at": { "type": "string", "format": "date-time" },
@@ -50,6 +51,16 @@
       }
     },
     "next_action": { "type": "string", "minLength": 1 },
+    "layer2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executor_vendor", "reviewer_vendor", "self_review"],
+      "properties": {
+        "executor_vendor": { "enum": ["anthropic", "openai", "google"] },
+        "reviewer_vendor": { "enum": ["anthropic", "openai", "google"] },
+        "self_review": { "type": "boolean" }
+      }
+    },
     "blocked_on": { "type": ["string", "null"] },
     "unresolved_risks": { "type": "array", "items": { "type": "string" } },
     "workflow_efficiency": {

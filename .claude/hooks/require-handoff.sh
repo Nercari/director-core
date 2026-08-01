@@ -23,6 +23,83 @@ if ! jq empty "$HANDOFF" 2>/dev/null; then
 fi
 
 SCHEMA="$ROOT/schemas/handoff.schema.json"
+ROUTES="$ROOT/.director/routes.yaml"
+
+if [ ! -f "$SCHEMA" ]; then
+  echo "DENIED by require-handoff: no validator, and no schema at $SCHEMA." >&2
+  echo "There is nothing left to enforce the handoff contract with." >&2
+  exit 2
+fi
+
+# jq on this platform ends its output lines with CRLF. Strip it from every
+# value read from the schema or registry before comparing it.
+strip_cr() { tr -d '\015'; }
+
+validator_available=0
+if command -v check-jsonschema >/dev/null 2>&1; then
+  validator_available=1
+fi
+
+deny() {
+  echo "DENIED by require-handoff: $1" >&2
+  if [ "$validator_available" -eq 0 ]; then
+    echo "(enforced directly — check-jsonschema is not installed)" >&2
+  fi
+  exit 2
+}
+
+enforce_layer2_record() {
+  while read -r field; do
+    [ -n "$field" ] || continue
+    jq -e --arg f "$field" 'has($f) and (.[$f] != null)' "$HANDOFF" >/dev/null 2>&1 \
+      || deny "handoff is missing required field: $field"
+  done < <(jq -r '.required[]? | select(. == "layer2")' "$SCHEMA" | strip_cr)
+
+  layer2_type="$(jq -r '.properties.layer2.type // ""' "$SCHEMA" | strip_cr)"
+  if [ "$layer2_type" = "object" ]; then
+    jq -e '.layer2 | type == "object"' "$HANDOFF" >/dev/null 2>&1 \
+      || deny "handoff field layer2 must be an object"
+  fi
+
+  while read -r field; do
+    [ -n "$field" ] || continue
+    jq -e --arg f "$field" \
+      '(.layer2 | (type == "object") and has($f) and (.[$f] != null))' \
+      "$HANDOFF" >/dev/null 2>&1 \
+      || deny "handoff is missing required field: layer2.$field"
+  done < <(jq -r '.properties.layer2.required[]?' "$SCHEMA" | strip_cr)
+
+  while read -r field; do
+    [ -n "$field" ] || continue
+    allowed="$(jq -r --arg f "$field" \
+      '.properties.layer2.properties[$f].enum // [] | join(" ")' \
+      "$SCHEMA" | strip_cr)"
+    value="$(jq -r --arg f "$field" '.layer2[$f] // ""' "$HANDOFF" | strip_cr)"
+    case " $allowed " in
+      *" $value "*) : ;;
+      *) deny "layer2.$field=${value:-<missing>} is not one of: $allowed" ;;
+    esac
+  done < <(jq -r '.properties.layer2.properties | to_entries[]
+                | select(.value.enum != null)
+                | .key' "$SCHEMA" | strip_cr)
+
+  while read -r field; do
+    [ -n "$field" ] || continue
+    expected_type="$(jq -r --arg f "$field" \
+      '.properties.layer2.properties[$f].type // ""' "$SCHEMA" | strip_cr)"
+    case "$expected_type" in
+      boolean)
+        jq -e --arg f "$field" '.layer2[$f] | type == "boolean"' "$HANDOFF" \
+          >/dev/null 2>&1 \
+          || deny "layer2.$field must be a boolean"
+        ;;
+    esac
+  done < <(jq -r '.properties.layer2.properties | to_entries[]
+                | select(.value.type != null)
+                | .key' "$SCHEMA" | strip_cr)
+}
+
+enforce_layer2_record
 
 if command -v check-jsonschema >/dev/null 2>&1; then
   if ! check-jsonschema --schemafile "$SCHEMA" "$HANDOFF" >/dev/null 2>&1; then
@@ -30,8 +107,7 @@ if command -v check-jsonschema >/dev/null 2>&1; then
     check-jsonschema --schemafile "$SCHEMA" "$HANDOFF" 2>&1 | head -5 >&2
     exit 2
   fi
-  exit 0
-fi
+else
 
 # --- the validator is absent -------------------------------------------------
 #
@@ -51,30 +127,18 @@ fi
 # restated here. A hand-copied list is a second source of truth that drifts
 # silently, and the drift would surface as a gate permitting what the schema
 # forbids — the exact failure being fixed.
-if [ ! -f "$SCHEMA" ]; then
-  echo "DENIED by require-handoff: no validator, and no schema at $SCHEMA." >&2
-  echo "There is nothing left to enforce the handoff contract with." >&2
-  exit 2
-fi
-
 echo "require-handoff: check-jsonschema is NOT installed, so this handoff is not" >&2
 echo "  validated against the full schema. Enforcing directly, from $SCHEMA:" >&2
 echo "  its required fields, the capacity_state enumeration, repository_state's" >&2
-echo "  own required fields, and non-empty text where the schema demands it." >&2
+echo "  own required fields, layer2's enum and boolean, and non-empty text where" >&2
+echo "  the schema demands it." >&2
 echo "  NOT checked on this path: item shape inside decisions_taken and the" >&2
 echo "  arrays, additionalProperties, and string formats." >&2
 
-deny() {
-  echo "DENIED by require-handoff: $1" >&2
-  echo "(enforced directly — check-jsonschema is not installed)" >&2
-  exit 2
-}
-
-# jq on this platform ends its output lines with CRLF, so every value read from
-# the schema arrives carrying a trailing carriage return and matches nothing.
-# The behavior check's first run refused a valid handoff for a missing
-# published_at that was present. strip_cr is why that does not happen.
-strip_cr() { tr -d '\015'; }
+# deny() and strip_cr() are defined once near the top of this file, where the
+# Layer 2 checks that also need them run. They used to be declared here as well;
+# the second pair silently shadowed the first and was one more place for the two
+# to drift apart.
 
 while read -r field; do
   [ -n "$field" ] || continue
@@ -107,5 +171,38 @@ case " $allowed_states " in
 *" $state "*) : ;;
 *) deny "capacity_state=${state:-<missing>} is not one of: $allowed_states" ;;
 esac
+fi
+
+if jq -e '(.workflow_efficiency | type == "object") and (.workflow_efficiency.work_unit_route? != null)' \
+  "$HANDOFF" >/dev/null 2>&1; then
+  route="$(jq -r '.workflow_efficiency.work_unit_route' "$HANDOFF" | strip_cr)"
+
+  if [ ! -f "$ROUTES" ]; then
+    deny "cannot look up route '$route': .director/routes.yaml is missing"
+  fi
+
+  route_block="$(strip_cr < "$ROUTES" | awk -v route="$route" '
+    $0 == "  " route ":" { found=1; next }
+    found && $0 ~ /^  [A-Za-z_][A-Za-z0-9_]*:/ { exit }
+    found { print }
+  ')"
+  if [ -z "$route_block" ]; then
+    deny "route '$route' is not declared in .director/routes.yaml and has no vendor key"
+  fi
+
+  route_vendor="$(printf '%s\n' "$route_block" \
+    | sed -n 's/^    vendor:[[:space:]]*//p' \
+    | head -1 \
+    | sed 's/[[:space:]]*#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//' \
+    | strip_cr)"
+  if [ -z "$route_vendor" ]; then
+    deny "route '$route' has no vendor key in .director/routes.yaml"
+  fi
+
+  executor_vendor="$(jq -r '.layer2.executor_vendor // ""' "$HANDOFF" | strip_cr)"
+  if [ "$route_vendor" != "$executor_vendor" ]; then
+    deny "route '$route' declares vendor '$route_vendor', but layer2.executor_vendor is '$executor_vendor'"
+  fi
+fi
 
 exit 0

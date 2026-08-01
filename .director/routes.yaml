@@ -11,8 +11,10 @@
 # three times, and twice a human caught it after merge.
 
 routes:
+  # vendor is the authoritative source for the handoff Layer 2 record.
   ORCH_PRIMARY:
     tool: claude
+    vendor: anthropic
     version_seen: 2.1.220
     auth: subscription          # Claude Pro, OAuth
     model: default              # harness-selected; the swap drill governs changes
@@ -22,6 +24,7 @@ routes:
 
   ORCH_FALLBACK:
     tool: codex
+    vendor: openai
     version_seen: 0.145.0
     auth: subscription          # "Logged in using ChatGPT"
     model: default
@@ -33,6 +36,7 @@ routes:
 
   EXEC_PRIMARY:
     tool: agy
+    vendor: google
     version_seen: 1.1.8
     auth: subscription          # Google AI Pro, OAuth
     model: gemini-3.6-flash-medium
@@ -116,6 +120,7 @@ routes:
 
   EXEC_STRONG:
     tool: codex
+    vendor: openai
     version_seen: 0.145.0
     auth: subscription
     # Pinned 2026-08-01 at the operator's direction. Was `default`, which resolved
