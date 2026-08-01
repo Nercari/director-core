@@ -10,7 +10,7 @@
     "status": { "enum": ["completed", "blocked", "failed"] },
     "branch": { "type": "string", "pattern": "^task/[a-z0-9][a-z0-9-]*$" },
     "route_used": {
-      "enum": ["EXEC_PRIMARY", "EXEC_STRONG", "EXEC_LOCAL", "DIRECT"]
+      "enum": ["EXEC_PRIMARY", "EXEC_STRONG", "DIRECT"]
     },
     "summary": { "type": "string", "minLength": 1 },
     "files_changed": { "type": "array", "items": { "type": "string" } },

@@ -147,20 +147,11 @@ routes:
     jail_verified: true                  # probed live 2026-07-26: gh dead, push cannot authenticate
     last_verified: 2026-07-26
 
-  EXEC_LOCAL:
-    tool: lmstudio
-    runs_as: operator
-    auth: local
-    model: gemma-4-12b-agentic-fable5-composer2.5-v2-3.5x-tau2
-    quant: Q4_K_M
-    size_gb: 7.38
-    state: absent               # absent | candidate | active — §17.1
-    blocked_by:
-      - capability test not run
-      - hermes-codex-harness still Phase-0 only
-      - capacity has never bound
-      - pipeline Phase 4 incomplete
-    last_verified: 2026-07-26
+# EXEC_LOCAL was removed 2026-08-01. It had state: absent, had never run a unit,
+# was blocked by four unmet conditions, and was still named in the gate's list of
+# authorised routes — a result declaring it passed route authorisation. The
+# registry now lists only routes that could be selected. Git history and the
+# failure records keep the reasons it was tried and abandoned.
 
 # Capacity states — blueprint §7.4. Set by hand in .director/current-handoff.json;
 # operator judgement outranks inference. Detection is reactive: we learn we are

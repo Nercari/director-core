@@ -2,7 +2,7 @@
 
 **Supersedes:** all prior revisions (7.4, 8.x, 9.0–9.3, 10.0, 10.1, 10.2)
 **Date:** 2026-07-25
-**Operator:** solo, non-programmer. Subscriptions: Claude Pro · ChatGPT Plus · Google AI Pro · local models via LM Studio
+**Operator:** solo, non-programmer. Subscriptions: Claude Pro · ChatGPT Plus · Google AI Pro
 **Platform:** Windows 11 Pro, PowerShell primary, Git Bash (Cygwin bash 5.3.9) available
 **Policy:** zero metered spend, always. OAuth/subscription auth only — never an API key
 **Status:** implementation-ready. Every environment claim below was verified on this machine on 2026-07-25.
@@ -73,7 +73,7 @@ Three verification layers, valuable because they **fail differently from one ano
 
 ### 4.1 Design principles
 
-1. **Capability aliases, never model names.** `ORCH_PRIMARY`, `ORCH_FALLBACK`, `EXEC_PRIMARY`, `EXEC_STRONG`, `EXEC_LOCAL`.
+1. **Capability aliases, never model names.** `ORCH_PRIMARY`, `ORCH_FALLBACK`, `EXEC_PRIMARY`, `EXEC_STRONG`.
 2. **Prefer a native platform feature to bespoke code.**
 3. **Enforce mechanically where possible; declare honestly where not.**
 4. **Reversible by default.**
@@ -109,8 +109,7 @@ ORCHESTRATOR ── ORCH_PRIMARY (Claude Code — the only route with hooks)
 ENFORCEMENT ── GitHub rulesets · CI gate · hooks · 3 scripts · git
 ▼
 EXECUTOR ───── EXEC_PRIMARY        ── tool-specific sandbox; see §8.3
-     ├─ EXEC_STRONG   (escalation, named capability delta only)
-     └─ EXEC_LOCAL    (conditional — §17.1)
+     └─ EXEC_STRONG   (escalation, named capability delta only)
 │ produces: modified files inside the worktree. Nothing else.
 ▼
 EVIDENCE ───── worktree · branch · reviewed diff · raw test output
@@ -158,7 +157,6 @@ Path: `C:\Users\dorot\Documents\AI Projects\director-core\`. Public. Copied into
 | **`routes.yaml`** | §7.2 — models rotate, and different work needs different capability |
 | **The project's own CI additions** | A Python project's checks are not a shell project's |
 | **Path-scope conventions for a work unit** | Structure differs |
-| **Whether `EXEC_LOCAL` participates** | §17.1 |
 
 **A per-project decision recorded in conversation is a decision that does not exist.** Every item above lands in a file in that project's repository, or it has not been decided.
 
@@ -203,9 +201,8 @@ Before Phase 0 of any project, the orchestrator conducts one short interview. **
 1. **Query what exists.** `claude --version`, `codex login status`, `agy models`, `lms ls`. Facts discovered, not recalled.
 2. **Search for what is current**, at setup time, for anything the CLI does not report.
 3. **Propose a complete `routes.yaml`** with every alias filled and dated.
-4. **Ask you exactly three things**, and nothing else:
+4. **Ask you exactly two things**, and nothing else:
    - Which providers are near their cap right now? *(Your judgment is better here than any inference — this is reactive detection, and you know what you have been doing all week.)*
-   - Does this project need `EXEC_LOCAL`? *(Default: no. See §17.1.)*
    - Anything about this project that changes the defaults?
 5. **Write the file.** Not the chat.
 
@@ -298,7 +295,7 @@ run_id: string
 unit_id: string            # also the branch name: task/<unit-id>
 base_commit: sha
 change_class: green-path | behavior      # decides auto-merge eligibility (§9.4)
-route: EXEC_PRIMARY | EXEC_STRONG | EXEC_LOCAL | DIRECT
+route: EXEC_PRIMARY | EXEC_STRONG | DIRECT
 objective: string
 acceptance_criteria: [ observable condition ]
 allowed_paths: [ path or glob ]
@@ -329,7 +326,7 @@ The orchestrator creates the worktree and its `task/<unit-id>` branch before spa
 {
   "status": "completed | blocked | failed",
   "branch": "task/<unit-id>",
-  "route_used": "EXEC_PRIMARY | EXEC_STRONG | EXEC_LOCAL | DIRECT",
+  "route_used": "EXEC_PRIMARY | EXEC_STRONG | DIRECT",
   "summary": "short factual summary",
   "files_changed": [], "tests_run": [], "tests_passed": [], "tests_failed": [],
   "unresolved_risks": [], "deviations_from_plan": [],
@@ -526,7 +523,6 @@ No model decides. A **check** decides, and only for changes it fully covers.
 3. Every required check green.
 4. The diff touches none of: `.github/**`, `.claude/hooks/**`, `.claude/settings*.json`, `AGENTS.md`, `CLAUDE.md`, `.director/routes.yaml`, `scripts/**`. **A change to the enforcement layer is never green-path.**
 5. Capacity state A, B, or C. **Never C′** — Layer 2 is self-review there (§7.5).
-6. **`route_used` is not `EXEC_LOCAL`** while that route's `state: candidate` (§17.1).
 
 **Public-repo hardening, all free:** pin every action by full commit SHA; require manual approval for first-time-contributor workflow runs; enable Dependabot and the dependency-review action; CODEOWNERS on `.github/**`.
 
@@ -581,8 +577,6 @@ Kept apart because a change can satisfy every convention and still do the wrong 
 **Keep the prompt short.** A 2026 study of requirement-conformance judgement found LLM reviewers systematically overcorrect, and that prompts demanding detailed explanations *raised* the misjudgement rate. Ask for findings, not essays.
 
 **The binding rule:** may add reasons to reject; may never be the reason to merge.
-
-**Review is never delegated to `EXEC_LOCAL`.** See §17.1 — low correlation times low capability is not a useful reviewer.
 
 **Review is never performed by a model from the executor's vendor.**
 
@@ -739,7 +733,7 @@ These are binary, cost nothing to check, and are the rules that actually protect
 
 > **Nothing may be added — no rule, script, hook, note, route, or section — for a failure mode that has not occurred at least twice in the log.**
 
-Before investing in a fix, estimate its ceiling. If a category is 5% of failures, eliminating it perfectly buys 5%. Most proposed machinery targets categories at 0%. This rule deleted ten thousand words from an earlier revision and is what keeps this one from growing back. **It is also the rule that keeps `EXEC_LOCAL` out until capacity actually binds.**
+Before investing in a fix, estimate its ceiling. If a category is 5% of failures, eliminating it perfectly buys 5%. Most proposed machinery targets categories at 0%. This rule deleted ten thousand words from an earlier revision and is what keeps this one from growing back. **It is also the rule that removed `EXEC_LOCAL` rather than keep building for it — see §17.1.**
 
 ---
 
@@ -752,14 +746,11 @@ Absolute: **paid overage remains zero. OAuth or subscription auth only; no API k
 | Anthropic | no `ANTHROPIC_API_KEY` in the environment | **verified 2026-07-25: no `*_API_KEY` set.** Hook blocks any command carrying one |
 | OpenAI | no `CODEX_API_KEY` / `OPENAI_API_KEY` | **verified: `codex login status` → "Logged in using ChatGPT"** |
 | Google | no Gemini API key | **verified: agy authenticates against Google AI Pro** |
-| Local | no cloud credential in the local runner | `EXEC_LOCAL` is local inference only; if it ever needs a key, it is not this route |
 | GitHub | free plan; `director-core` public, content repos private | rulesets, push protection, Actions all included at $0 |
 | GitHub | Actions spending limit $0 | public-repo Actions on standard runners are unmetered anyway |
 | Vendor credits | credit / auto-top-up settings | **you must confirm these in account settings.** Prior revisions asserted specific behaviours here that could not be verified; they are not repeated |
 
 `preflight` checks every row it can check mechanically and refuses to launch if one fails, **and refuses on an unresolved or stale registry** (§7.2).
-
-**One future exemption, recorded now so it is not improvised later.** When `EXEC_LOCAL` activates, LM Studio's local endpoint conventionally takes a dummy `OPENAI_API_KEY=lm-studio`. The metered-credential hook would block your own local route. The fix is a narrow exemption for localhost endpoints, written when the route activates and not before.
 
 ---
 
@@ -881,38 +872,13 @@ So:
 
 **Executor-side push and PR creation.** Rejected in 10.2 — see §8.3. This is the change with the largest safety effect in this revision.
 
-### 17.1 `EXEC_LOCAL` — conditional, and deferred by default
+### 17.1 `EXEC_LOCAL` — removed 2026-08-01
 
-**What it is.** `gemma-4-12b-agentic-fable5-composer2.5-v2-3.5x-tau2`, Q4_K_M, 7.38 GB, in LM Studio. No metered cost, no cap, no vendor window — it consumes your machine instead of your subscription.
+The local-model route is gone. It held `state: absent` from the day it was written, never ran a unit, was blocked by four separate unmet conditions, and was still named in the gate's authorised-route list — so a result declaring it passed route authorisation. That is the same class of problem as the containment corrections: a document claiming a capability the machine does not provide.
 
-**The genuine argument for it.** Your binding constraint is capacity, not money. And it is **architecturally distant** from every cloud route — different lab, different training, different scale — which means less correlated failure, the scarce property in §2.
+Rev 10.0 dropped this route without a verdict, and §17.1 existed to make the deferral an explicit decision rather than an omission. That job is done: this is the verdict. The route, its model, its quantisation, and its runtime are out of the registry, the schemas, preflight and the gate. Git history and `.director/failures.md` keep the arguments for and against, the four admission conditions, and the candidate-state constraints, so reinstating it means re-deciding rather than re-deriving.
 
-**The arguments against, which currently win:**
-
-- **Capability.** Low correlation times low capability is not a useful reviewer, and §10's overcorrection finding bites hardest on weaker reviewers. **It is never Layer 2.**
-- **It cannot orchestrate.** The five conformance scenarios demand identical decisions across platforms. This rules the route out of `ORCH_*` permanently. (Executors do not decide, so the requirement does not bind them.)
-- **Its harness is not operational.** `hermes-codex-harness` is explicit: *"Only Phase 0 — evidence, compatibility, and safe substrate is authorized. Aux is disabled. OmniRoute is not an operational dependency."* Nothing drives gemma as an executor today.
-- **§13.3 forbids it.** The failure log is empty, capacity has never bound, and the pipeline has never run.
-
-**Therefore: `state: absent` in every project's registry until all four of the following hold.**
-
-1. **The capability test passes.** Two minutes: ask it to run `git status` in a folder and report the output. *Cannot run shell* → it is a chat model, not an executor. *Shell only* → usable inside a worktree, which under §8.3 is now the **only** thing any executor needs, since the orchestrator owns push and PR. That is a lower bar than 10.1 set, and deliberately so.
-2. **Its harness is operational** past its own Phase 0.
-3. **Capacity has actually bound.** You have hit a cap and it cost you work. Curiosity is not the trigger; a recorded failure is.
-4. **Phase 4 is complete.** The pipeline works end to end with known-good executors first.
-
-**When admitted, it enters as `state: candidate`** with these constraints:
-
-- at most 3 files in its permitted paths;
-- at least one required test per acceptance criterion;
-- forbidden to create files not named in the packet;
-- forbidden to change dependencies, configuration, or refactor untouched code;
-- **never auto-merges** (§9.4 condition 6);
-- **never Layer 2.**
-
-Promotion to `active` requires ten units merged with no correction attributable to the route. Demotion on the first silent failure.
-
-**Recorded as a decision, not an omission.** Rev 10.0 dropped this route without a verdict. That was the bug §17.1 exists to fix, which is why the stub stays in `routes.yaml` even at `state: absent`.
+The route that stays is `EXEC_PRIMARY`, quarantined and with no runnable `invoke:` key. It is the only non-OpenAI executor, and capacity state B depends on it; deleting it would collapse that state into a same-vendor cycle.
 
 ---
 
@@ -930,7 +896,7 @@ Five things that block Phase 0 and are not in any earlier revision:
 4. **`hermes-codex-harness` reports `dubious ownership`** and git refuses to read it. Unrelated to the Director, but it will block any git operation there.
 5. **Migrate the vault** (§11.2): mirror Drive → local, verify, `git init`, first commit with the exclusions in place, push private, then delete the Drive vault. **In that order** — the Drive copy is currently the only complete one.
 
-Then, per project: copy the core from `director-core`. Run the routing interview (§7.2). **Decide visibility (§9.1) and record the reason in the README.** Set `EXEC_LOCAL` to `state: absent` unless §17.1's four conditions hold.
+Then, per project: copy the core from `director-core`. Run the routing interview (§7.2). **Decide visibility (§9.1) and record the reason in the README.**
 
 *Verify:* `preflight` runs and passes. Blank one `model:` field and confirm it refuses.
 
@@ -957,8 +923,6 @@ Build the five conformance scenarios: executor reports success with an uncommitt
 
 **Phase 5 — the vault, once there is something to remember.**
 Populate `04_Memory/` only with procedures that have already recurred three times.
-
-**Phase 6 — `EXEC_LOCAL`, only if §17.1's four conditions hold.**
 
 ---
 
@@ -1151,7 +1115,7 @@ Twice, a CI check was green **because it was not looking**: the shellcheck glob 
 
 **The vault:** `C:\Users\dorot\Documents\Obsidian Vaults\Antigravity\`. Before migration it held 139 files against the Drive copy's 523 — a strict subset, **0 files unique to local**, and of 34 files present in both with differing content, **Drive was newer in all 34**. So the migration is a one-way mirror, not a merge. `projects/Projeto Magistratura/` holds 118 PDFs and 112.3 MB, with 50 of those PDFs inside `wiki/`, not only `raw/`. Drive **conflicted copies exist**: `_lock (1).md`, `_suggestions (1).md`, `AGENTS (1).md`.
 
-**Local model:** `gemma-4-12b-agentic-fable5-composer2.5-v2-3.5x-tau2`, 12B, Q4_K_M, 7.38 GB, in LM Studio, alongside `google/gemma-4-12b-qat` and a nomic embedding model. Ollama separately holds `qwen2.5:7b`.
+**Local model:** `gemma-4-12b-agentic-fable5-composer2.5-v2-3.5x-tau2`, 12B, Q4_K_M, 7.38 GB, in LM Studio, alongside `google/gemma-4-12b-qat` and a nomic embedding model. Ollama separately holds `qwen2.5:7b`. Recorded as machine inventory only — none of it is a route, and `EXEC_LOCAL` was removed (§17.1).
 
 **Confirmed against primary documentation:** Claude Code reads `CLAUDE.md`, not `AGENTS.md`, with no fallback · `@AGENTS.md` import is a documented bridge · PreToolUse exit 2 denies a tool call · Codex defaults to `workspace-write` with network off and `.git` read-only · Codex CLI does not auto-create worktrees · rulesets and branch protection are free on public repos and unavailable on free private repos · you cannot approve your own PR · an empty bypass list makes rules apply to the owner · the Actions spending limit defaults to $0 and hard-stops · secret scanning and push protection are free and on by default for public repos · Actions minutes are unlimited on public repos with standard runners · fine-grained tokens cannot exclude a branch · required status checks work alongside zero approvals · `pull_request` runs fork PRs with a read-only token and no secrets while `pull_request_target` does not · auto-merge is available on free public repos · merge queues are organization-only · grep exits 1 on no match · GitHub refuses workflow-file pushes from tokens lacking `workflow` scope.
 

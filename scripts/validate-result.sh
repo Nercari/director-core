@@ -229,7 +229,7 @@ fi
 
 if [ -n "$route" ] && [ "$route" != "null" ]; then
   case "$route" in
-    EXEC_PRIMARY | EXEC_STRONG | EXEC_LOCAL | DIRECT)
+    EXEC_PRIMARY | EXEC_STRONG | DIRECT)
       pass "route_used=$route is authorised"
       ;;
     *)

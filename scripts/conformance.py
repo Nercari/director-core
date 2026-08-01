@@ -524,6 +524,27 @@ def scenario_result_route_used_closed_enum() -> tuple[bool, str]:
         return False, f"fixture could not be built or exercised: {error}"
 
 
+def scenario_removed_route_is_not_authorised() -> tuple[bool, str]:
+    """EXEC_LOCAL was deleted; a result declaring it must not pass authorisation."""
+    try:
+        with ValidatorFixture("removed-route-rejected") as fixture:
+            fixture.modify_files({"allowed.txt": "in scope\n"})
+            fixture.write_packet(["allowed.txt"], [])
+            fixture.write_raw_result(
+                {
+                    "status": "completed",
+                    "branch": "task/removed-route-rejected",
+                    "route_used": "EXEC_LOCAL",
+                    "summary": "conformance fixture",
+                }
+            )
+            return expect_validator_reject(
+                fixture, "route_used=EXEC_LOCAL is not allowed"
+            )
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
 def scenario_forbidden_paths_deny_before_allow() -> tuple[bool, str]:
     """A deny glob beats an allow glob that also matches the same file."""
     try:
@@ -654,11 +675,6 @@ def preflight_fixture_routes(primary_block: str) -> str:
     model: default
     runs_as: operator
     last_verified: 2026-07-26
-  EXEC_LOCAL:
-    model: local
-    runs_as: operator
-    state: absent
-    last_verified: 2026-07-26
 """
 
 
@@ -753,16 +769,8 @@ def scenario_route_availability() -> tuple[bool, str]:
     model: strong-fixture
     runs_as: operator
     invoke: scripts/exec-jail.sh strong-fixture
-    quarantined: true
-    jail_verified: false
-    last_verified: 2026-07-26
-  EXEC_LOCAL:
-    model: local-fixture
-    runs_as: operator
-    invoke: scripts/exec-jail.sh local-fixture
     quarantined: false
     jail_verified: true
-    state: active
     last_verified: 2026-07-26
 """
     try:
@@ -771,8 +779,7 @@ def scenario_route_availability() -> tuple[bool, str]:
             return False, f"availability declarations made preflight exit {result.returncode}"
         expected_lines = (
             "EXEC_PRIMARY route unusable: invoke key absent",
-            "EXEC_STRONG route unusable: quarantined; jail not verified",
-            "EXEC_LOCAL route usable",
+            "EXEC_STRONG route usable",
         )
         missing = [line for line in expected_lines if line not in result.output]
         if missing:
@@ -805,14 +812,6 @@ def scenario_route_availability_gate() -> tuple[bool, str]:
     invoke: scripts/exec-jail.sh strong-fixture
     quarantined: true
     jail_verified: true
-    last_verified: 2026-07-26
-  EXEC_LOCAL:
-    model: local-fixture
-    runs_as: operator
-    invoke: scripts/exec-jail.sh local-fixture
-    quarantined: true
-    jail_verified: true
-    state: absent
     last_verified: 2026-07-26
 """
     usable_strong_route = all_quarantined_routes.replace(
@@ -1107,6 +1106,7 @@ def main() -> int:
         scenario_required_tests_take_no_shell(),
         scenario_required_tests_are_bounded(),
         scenario_required_tests_ordinary_entries_pass(),
+        scenario_removed_route_is_not_authorised(),
     )
     all_passed = True
     for index, (passed, reason) in enumerate(outcomes, 1):

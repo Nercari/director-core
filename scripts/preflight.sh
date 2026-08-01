@@ -100,7 +100,7 @@ else
 
   # An unresolved alias means the routing interview never happened. Refuse —
   # this is the mechanical backstop that turns "should ask" into "cannot start".
-  for alias in ORCH_PRIMARY ORCH_FALLBACK EXEC_PRIMARY EXEC_STRONG EXEC_LOCAL; do
+  for alias in ORCH_PRIMARY ORCH_FALLBACK EXEC_PRIMARY EXEC_STRONG; do
     block="$(awk -v a="$alias:" '
       $0 ~ "^  "a"$" {f=1; next}
       f && /^  [A-Z_]+:$/ {exit}
@@ -171,7 +171,7 @@ else
     esac
 
     case "$alias" in
-      EXEC_PRIMARY | EXEC_STRONG | EXEC_LOCAL)
+      EXEC_PRIMARY | EXEC_STRONG)
         quarantined="$(echo "$block" | field quarantined)"
         jail_verified="$(echo "$block" | field jail_verified)"
         invoke="$(echo "$block" | field invoke)"
@@ -199,14 +199,6 @@ else
         fi
         ;;
     esac
-
-    if [ "$alias" = "EXEC_LOCAL" ]; then
-      state="$(echo "$block" | field state)"
-      case "$state" in
-        absent | candidate | active) pass "EXEC_LOCAL state: $state" ;;
-        *) fail "EXEC_LOCAL state invalid or missing (got: '${state:-<empty>}')" ;;
-      esac
-    fi
 
     lv="$(echo "$block" | field last_verified)"
     if [ -z "$lv" ]; then
