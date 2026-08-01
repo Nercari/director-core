@@ -6,6 +6,7 @@ param(
     [string]$WorkingDirectory = (Get-Location).Path,
     [string]$Repository,
     [string]$ExecutorCommand = "codex",
+    [string]$ExecutorBinDirectory,
     [string]$OutputPath
 )
 
@@ -210,6 +211,28 @@ function Resolve-Executable {
     return [string]$command.Source
 }
 
+function Add-ExecutableDirectoryToPath {
+    param([string]$Directory)
+
+    if ([string]::IsNullOrWhiteSpace($Directory)) {
+        return ""
+    }
+    if (-not (Test-Path -LiteralPath $Directory -PathType Container)) {
+        throw "executor binary directory does not exist: $Directory"
+    }
+
+    $resolved = (Resolve-Path -LiteralPath $Directory -ErrorAction Stop).Path
+    $currentPath = [Environment]::GetEnvironmentVariable("Path", "Process")
+    $normalized = $resolved.TrimEnd("\\")
+    $alreadyPresent = @($currentPath -split ";" | Where-Object {
+            -not [string]::IsNullOrWhiteSpace($_) -and $_.Trim().TrimEnd("\\") -ieq $normalized
+        }).Count -gt 0
+    if (-not $alreadyPresent) {
+        [Environment]::SetEnvironmentVariable("Path", ($resolved + ";" + $currentPath), "Process")
+    }
+    return $resolved
+}
+
 function Get-ToolEvidence {
     param(
         [string]$Name,
@@ -234,6 +257,29 @@ function Get-ToolEvidence {
         present = $true
         path = $resolved
         version = $version
+    }
+}
+
+function Get-ExecutorLoginEvidence {
+    param([System.Collections.IDictionary]$Tool)
+
+    if ($null -eq $Tool -or -not [bool]$Tool.present) {
+        return [ordered]@{
+            executed = $false
+            authenticated = $false
+            exit_code = 1
+            detail = "executor is not resolvable"
+        }
+    }
+
+    $result = Invoke-WithGuardedEnvironment {
+        Invoke-CapturedCommand -FilePath ([string]$Tool.path) -ArgumentList @("login", "status")
+    }
+    return [ordered]@{
+        executed = $true
+        authenticated = ([int]$result.exit_code -eq 0)
+        exit_code = [int]$result.exit_code
+        detail = $(if ([int]$result.exit_code -eq 0) { "authenticated" } else { "not authenticated" })
     }
 }
 
@@ -339,6 +385,12 @@ function Invoke-SmokeTask {
                 $result.artifact_removed = $true
             } catch {
                 $result.artifact_removed = $false
+                $cleanupError = "smoke artifact cleanup failed: " + (Redact-Text ([string]$_))
+                $result.error = if ([string]::IsNullOrWhiteSpace($result.error)) {
+                    $cleanupError
+                } else {
+                    $result.error + "; " + $cleanupError
+                }
             }
         } else {
             $result.artifact_removed = $true
@@ -366,6 +418,7 @@ function Invoke-GitPushProbe {
     $branch = "director-exec-probe-" + [guid]::NewGuid().ToString("N")
     $result = Invoke-WithGuardedEnvironment -UnsetProxy {
         Invoke-CapturedCommand -FilePath $GitPath -ArgumentList @(
+            "-c", "safe.directory=$RepositoryPath",
             "-C", $RepositoryPath,
             "-c", "http.proxy=",
             "-c", "https.proxy=",
@@ -398,6 +451,8 @@ function New-ProbeEvidence {
     )
     $git = Get-ToolEvidence -Name "git"
     $executor = Get-ToolEvidence -Name $ExecutorCommand
+    $executorLogin = Get-ExecutorLoginEvidence -Tool $executor
+    $executor["login"] = $executorLogin
     $gh = Get-ToolEvidence -Name "gh"
     $credentials = Get-CredentialEvidence -GitPath $(if ($git.present) { $git.path } else { "" })
     $smoke = Invoke-SmokeTask -Directory $WorkingDirectory
@@ -421,9 +476,11 @@ function New-ProbeEvidence {
     }
     if (-not $executor.present) {
         $failures.Add("required executor '$ExecutorCommand' is not resolvable")
+    } elseif (-not $executorLogin.authenticated) {
+        $failures.Add("restricted executor does not have its own Codex login")
     }
-    if (-not $smoke.passed) {
-        $failures.Add("deterministic no-network smoke task failed")
+    if (-not ($smoke.passed -and $smoke.artifact_removed)) {
+        $failures.Add("deterministic no-network smoke task did not create, read, and remove its artifact")
     }
 
     $credentialSignals = @($credentials.environment | Where-Object { $_.present })
@@ -540,6 +597,12 @@ function Invoke-SelfTest {
         $failures.Add("identity guard accepted a mismatched account")
     }
     Write-Output ("self-test: identity guard " + $(if ($identityGuard) { "OK" } else { "FAIL" }))
+
+    $missingExecutorLogin = Get-ExecutorLoginEvidence -Tool ([ordered]@{ present = $false })
+    if ($missingExecutorLogin.authenticated -or $missingExecutorLogin.executed) {
+        $failures.Add("executor login guard accepted a missing executor")
+    }
+    Write-Output ("self-test: executor login guard " + $(if (-not $missingExecutorLogin.authenticated) { "OK" } else { "FAIL" }))
     $sidGuard = (
         (Test-ExpectedSid "S-1-5-21-100" "S-1-5-21-100") -and
         (-not (Test-ExpectedSid "S-1-5-21-100" "S-1-5-21-200")) -and
@@ -623,6 +686,9 @@ if ($SelfTest) {
     exit $script:SelfTestExitCode
 }
 
+$WorkingDirectory = (Resolve-Path -LiteralPath $WorkingDirectory -ErrorAction Stop).Path
+Set-Location -LiteralPath $WorkingDirectory -ErrorAction Stop
+$null = Add-ExecutableDirectoryToPath -Directory $ExecutorBinDirectory
 $evidence = New-ProbeEvidence
 $json = $evidence | ConvertTo-Json -Depth 16
 if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {

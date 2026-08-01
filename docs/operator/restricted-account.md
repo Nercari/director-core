@@ -14,6 +14,8 @@ with their own review and rollback.
 
 - the effective Windows account, SID, groups, process, parent process, working
   directory, user profile, and resolved tool paths;
+- the restricted account's own Codex login state, recorded only as an
+  authenticated/not-authenticated result without emitting login output;
 - credential signals without reading credential values, including environment
   variables, the GitHub CLI hosts file, and Git credential-helper presence;
 - `gh auth status`, `gh api user`, and a credential-free `git push --dry-run`,
@@ -37,6 +39,11 @@ target directly with `Start-Process -Credential`, redirects output through a
 temporary directory, redacts output, and removes that directory at exit. The
 password is not written to a file, environment variable, argument list, or
 repository artifact.
+
+The one-step wrapper resolves the local Codex CLI and supplies only its binary
+directory to the restricted child process PATH. It does not copy the calling
+account's `.codex` directory, token, or login. `director-exec` must complete
+its own interactive Codex login before the evidence can be `completed`.
 
 ## Local self-test
 
@@ -64,7 +71,7 @@ The expected success status is `completed`. Inspect the JSON itself and retain
 it as evidence. In particular, confirm `identity.user` is `director-exec`,
 `identity_checks.sid_matches_expected` is true,
 `path.user_profile_matches_expected_user` is true,
-`smoke.passed` is true, both `gh` checks refused, and
+`tools.executor.login.authenticated` is true, `smoke.passed` is true, both `gh` checks refused, and
 `git_push_dry_run.credential_refused` is true. A failed or incomplete report is
 not promoted by editing its status.
 

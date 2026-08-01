@@ -18,6 +18,13 @@ $account = Get-LocalUser -Name $UserName -ErrorAction Stop
 $expectedSid = [string]$account.SID.Value
 $probePath = Join-Path $repositoryPath "scripts\restricted-account-probe.ps1"
 $launcherPath = Join-Path $PSScriptRoot "exec-as-account.ps1"
+$executor = Get-Command -Name "codex" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandType -in @("Application", "ExternalScript") } |
+    Select-Object -First 1
+if ($null -eq $executor) {
+    throw "Codex CLI is not resolvable for the launcher account"
+}
+$executorBinDirectory = Split-Path -Parent ([string]$executor.Source)
 if (-not (Test-Path -LiteralPath $probePath -PathType Leaf)) {
     throw "restricted account probe is missing: $probePath"
 }
@@ -28,6 +35,6 @@ if (-not (Test-Path -LiteralPath $launcherPath -PathType Leaf)) {
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
     $OutputPath = Join-Path $repositoryPath ".director\evidence\restricted-account-probe.json"
 }
-$probeArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$probePath`" -ExpectedUser $UserName -ExpectedSid $expectedSid -WorkingDirectory `"$repositoryPath`" -Repository `"$repositoryPath`" -OutputPath `"$OutputPath`""
+$probeArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$probePath`" -ExpectedUser $UserName -ExpectedSid $expectedSid -WorkingDirectory `"$repositoryPath`" -Repository `"$repositoryPath`" -ExecutorBinDirectory `"$executorBinDirectory`" -OutputPath `"$OutputPath`""
 & $launcherPath -UserName $UserName -FilePath "powershell.exe" -ArgumentList $probeArgs -WorkingDirectory $repositoryPath
 exit $LASTEXITCODE
