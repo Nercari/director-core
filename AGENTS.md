@@ -13,7 +13,8 @@ Reasoning lives in `docs/blueprint.md`. These are the rules. Keep this file shor
 1. One writer at a time. `scripts/worktree.sh` holds the lock. Readers unlimited.
 2. The executor cannot push, open a pull request, or merge — **provided you invoke it through `scripts/exec-jail.sh`, which is what each usable route's `invoke:` line in `routes.yaml` does. Never call an executor binary directly. A route with no `invoke:` key is not usable — see §7.4.** Jailed and probed 2026-07-26: `gh` unauthenticated, `gh api` refused, `git push` cannot authenticate. Unjailed, all three succeed.
 2a. **Executors have made incidental writes** (for example a stray log, cache, or their own memory file), while observed runs respected declared task boundaries: they stopped at stop conditions, refused unavailable commits, reported the exact reason, and did not touch forbidden paths. Never treat an executor's exit code or prose as evidence anyway. Diff its working-tree changes yourself and reject any scope violation — that check belongs to the orchestrator.
-2b. **Egress is still open.** The jail removes gate credentials, not network access. An executor can fetch and could exfiltrate. That is an accepted, recorded residual (§21.8) — do not describe the jail as isolation.
+2b. **Egress is closed for the `director-exec` account only, and no route runs as that account.** TCP egress from `director-exec` is denied by SID-scoped firewall rules and was measured on 2026-07-30. UDP/443 is denied by the same rules and has never been observed being denied — this curl has no HTTP3 support, so the QUIC probe has never run. `scripts/exec-jail.sh` performs credential removal, not account isolation: it scrubs gate credentials and does not switch user, so an executor launched through it inherits the invoking account's unrestricted network. **Until a route declares `runs_as: director-exec` and preflight proves it, every executor has full network and can exfiltrate.** Do not describe the jail as isolation.
+2c. **No adapter imposes on another harness a restriction written for Claude, Codex, or any single vendor.** Required isolation and safety properties are imposed by the runner or by external controls — identity, ACL, worktree, sandbox/jail, network, validation, rulesets — and stated as the property that must hold, never as one vendor's flag. A vendor flag is an implementation detail of the adapter that happens to be running. Recorded 2026-07-30: a Claude-flag rule blocked an unrelated evaluation harness while failing to stop the same behavior through a subprocess.
 3. Never push to `main`. Never force-push. Never `reset --hard` a pushed branch. Never rewrite history — revert instead.
 4. Every headless agent call carries a `timeout`, and no inner timeout is shorter than the outer one.
 5. No `*_API_KEY` in any command. Subscription and OAuth auth only.
@@ -53,11 +54,13 @@ Never review with a model from the executor's vendor.
 
 ## Auto-merge
 
-Only `change_class: green-path`, only with every check green, only when the diff touches none of `.github/**`, `.claude/hooks/**`, `.claude/settings*.json`, `AGENTS.md`, `CLAUDE.md`, `.director/routes.yaml`, `scripts/**`.
+**Auto-merge is off.** The operator merges every pull request, by hand, after watching the behavior check. `gh pr merge --auto` is denied by `.claude/hooks/block-dangerous-bash.sh`, and the hook self-test asserts that denial.
 
-If `change_class` is ever ambiguous, it is `behavior`.
+The eligibility rules that used to sit here — green-path only, every check green, a protected-path list — lived in prose and nothing recomputed them for the commit being merged. Auto-merge was armed on four behavior-class units and correctly zero times that anyone measured. It was removed rather than verified, because the pipeline has not yet completed one work unit end to end and there is nothing to optimise.
 
-**The operator's spot-check is an intent audit, not a code review.** One question per sampled pull request: *should this have been `behavior`?*
+The deleted rules are in git history. Earning the capability back means building a deterministic eligibility check, not restoring the prose.
+
+`change_class` still declares intent in the packet. If it is ever ambiguous, it is `behavior`.
 
 ## Token accounting
 

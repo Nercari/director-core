@@ -27,6 +27,11 @@ secrets/
 # Worktrees live as siblings, never inside
 director-core-*/
 
+# Runtime hook control, written by scripts/worktree.sh and by the hook selftest.
+# Machine state for the session in flight, never repository content — committing
+# it changes hook behaviour for every later clone and session.
+.director/active-worktree
+
 # OS noise
 Thumbs.db
 desktop.ini

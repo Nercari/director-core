@@ -15,6 +15,12 @@ RESULT="$RUN/result.json"
 PACKET="$RUN/packet.yaml"
 FAIL=0
 
+# A fixed outer bound on every re-run test. Non-negotiable rule 4 says every
+# agent call carries a timeout; this is that rule's enforcement point in the
+# gate rather than only in prose. Overridable so the conformance suite can
+# exercise the timeout path in seconds instead of a quarter of an hour.
+TEST_TIMEOUT="${DIRECTOR_TEST_TIMEOUT:-900}"
+
 pass() { printf '  [ OK ]  %s\n' "$1"; }
 fail() { printf '  [FAIL]  %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
@@ -139,12 +145,48 @@ if [ -f "$PACKET" ] && [ "$base_valid" -eq 1 ]; then
     } | sort -u
   )"
   allowed="$(sed -n '/^allowed_paths:/,/^[a-z_]*:/p' "$PACKET" | sed -n 's/^ *- *//p')"
+  # The packet is the single declaration of scope. Nothing is denied by default
+  # here and nothing is hardcoded: an empty forbidden_paths means no deny stage.
+  forbidden="$(sed -n '/^forbidden_paths:/,/^[a-z_]*:/p' "$PACKET" | sed -n 's/^ *- *//p')"
+
+  # A glob in both lists is not a conflict to resolve — it is a scope declaration
+  # that does not say what it permits. Resolving it either way invents an intent
+  # the packet never expressed, and resolving it permissively is the failure this
+  # deny stage exists to prevent.
+  ambiguous=""
+  while IFS= read -r deny_glob; do
+    [ -z "$deny_glob" ] && continue
+    while IFS= read -r allow_glob; do
+      [ -z "$allow_glob" ] && continue
+      [ "$deny_glob" = "$allow_glob" ] && ambiguous="$ambiguous$deny_glob"$'\n'
+    done <<< "$allowed"
+  done <<< "$forbidden"
+  if [ -n "$ambiguous" ]; then
+    fail "ambiguous scope declaration — the same path is in both allowed_paths and forbidden_paths — REJECT:"
+    # shellcheck disable=SC2086  # intentional word splitting, one path per line
+    printf '            %s\n' $ambiguous
+  fi
+
   if [ -z "$allowed" ]; then
     fail "packet declares no allowed_paths — REJECT. An undeclared scope is not an unlimited scope."
-  else
+  elif [ -z "$ambiguous" ]; then
+    # Deny before allow. A changed path matching any forbidden glob is rejected
+    # whatever allowed_paths says, so granting scope on one file can never grant
+    # scope on a file the packet explicitly withheld.
+    denied=""
     outside=""
     while IFS= read -r f; do
       [ -z "$f" ] && continue
+      hit=""
+      while IFS= read -r glob; do
+        [ -z "$glob" ] && continue
+        # shellcheck disable=SC2254
+        case "$f" in $glob) hit="$glob"; break ;; esac
+      done <<< "$forbidden"
+      if [ -n "$hit" ]; then
+        denied="$denied$f (matched forbidden_paths glob: $hit)"$'\n'
+        continue
+      fi
       ok=0
       while IFS= read -r glob; do
         [ -z "$glob" ] && continue
@@ -153,12 +195,24 @@ if [ -f "$PACKET" ] && [ "$base_valid" -eq 1 ]; then
       done <<< "$allowed"
       [ "$ok" -eq 0 ] && outside="$outside$f"$'\n'
     done <<< "$changed"
+    if [ -n "$denied" ]; then
+      fail "files changed inside forbidden_paths — REJECT:"
+      # The glob is named beside the path so the operator can tell a scope
+      # violation from a validator bug without re-deriving the match. Printed a
+      # line at a time: the reason text contains spaces, so the word-splitting
+      # form used for bare paths below would shred it.
+      while IFS= read -r denied_line; do
+        [ -z "$denied_line" ] && continue
+        printf '            %s\n' "$denied_line"
+      done <<< "$denied"
+    fi
     if [ -n "$outside" ]; then
       fail "files changed outside declared paths — REJECT:"
       # shellcheck disable=SC2086  # intentional word splitting, one path per line
       printf '            %s\n' $outside
-    else
-      pass "all changed files within declared paths"
+    fi
+    if [ -z "$denied" ] && [ -z "$outside" ]; then
+      pass "all changed files within declared paths and outside forbidden_paths"
     fi
   fi
 fi
@@ -175,7 +229,7 @@ fi
 
 if [ -n "$route" ] && [ "$route" != "null" ]; then
   case "$route" in
-    EXEC_PRIMARY | EXEC_STRONG | EXEC_LOCAL | DIRECT)
+    EXEC_PRIMARY | EXEC_STRONG | DIRECT)
       pass "route_used=$route is authorised"
       ;;
     *)
@@ -199,16 +253,48 @@ if [ -n "$declared" ]; then
     echo "  ....    re-running required tests independently"
     mkdir -p "$RUN/evidence"
     trouble=0
-    while IFS= read -r cmd; do
-      [ -z "$cmd" ] && continue
-      log="$RUN/evidence/$(echo "$cmd" | tr -c 'a-zA-Z0-9' '_' | cut -c1-60).log"
-      if (cd "$WT" && eval "$cmd") > "$log" 2>&1; then
-        pass "re-ran: $cmd"
-      else
-        fail "re-run FAILED: $cmd (see $log)"
-        trouble=1
-      fi
-    done <<< "$declared"
+    # No shell. Each entry is split on whitespace into an argument vector and
+    # executed directly, so a packet field cannot become a second command. The
+    # packet is composed from material that includes externally authored issue
+    # text, and the word "test" never constrained what the string did.
+    #
+    # An entry carrying metacharacters therefore becomes one command with
+    # literal arguments: `python x.py; touch owned` runs python with the
+    # arguments `x.py;`, `touch`, `owned`. It fails, and the side effect the
+    # metacharacters were reaching for does not happen.
+    #
+    # Every entry written to date is two tokens — an interpreter and a script.
+    # The entry shape in the contract is unchanged; nothing here needs more.
+    #
+    # KNOWN CEILING: timeout terminates the direct child, not a process tree.
+    # A test that spawns a background process leaves it running on Windows.
+    # Named, not fixed — closing it is out of scope.
+    if ! command -v timeout >/dev/null 2>&1; then
+      fail "timeout is not available — refusing to re-run tests unbounded (rule 4) — REJECT"
+      trouble=1
+    else
+      while IFS= read -r cmd; do
+        [ -z "$cmd" ] && continue
+        log="$RUN/evidence/$(echo "$cmd" | tr -c 'a-zA-Z0-9' '_' | cut -c1-60).log"
+        # Word splitting is the whole mechanism: no globbing, no expansion, no
+        # quote handling. Any of those would reintroduce what this removed.
+        read -r -a argv <<< "$cmd"
+        if [ "${#argv[@]}" -eq 0 ]; then
+          continue
+        fi
+        (cd "$WT" && timeout "$TEST_TIMEOUT" "${argv[@]}") > "$log" 2>&1
+        test_status=$?
+        if [ "$test_status" -eq 0 ]; then
+          pass "re-ran: $cmd"
+        elif [ "$test_status" -eq 124 ]; then
+          fail "re-run TIMED OUT after ${TEST_TIMEOUT}s: $cmd (see $log)"
+          trouble=1
+        else
+          fail "re-run FAILED: $cmd (see $log)"
+          trouble=1
+        fi
+      done <<< "$declared"
+    fi
     [ "$trouble" -eq 0 ] && pass "raw output preserved in $RUN/evidence/"
   fi
 fi

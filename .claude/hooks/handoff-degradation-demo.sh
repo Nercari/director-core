@@ -19,7 +19,7 @@ TEMP="$(mktemp -d)"
 trap 'rm -rf "$TEMP"' EXIT
 
 # A handoff that satisfies the contract. Cases derive their variants from it.
-VALID='{"published_at":"2026-07-29T00:00:00Z","run_id":"demo","capacity_state":"C","objective":"demonstrate the gate","repository_state":{"main_commit":"0123456","open_branches":[],"open_pull_requests":[]},"decisions_taken":[],"next_action":"stop"}'
+VALID='{"published_at":"2026-07-29T00:00:00Z","run_id":"demo","capacity_state":"C","objective":"demonstrate the gate","repository_state":{"main_commit":"0123456","open_branches":[],"open_pull_requests":[]},"decisions_taken":[],"next_action":"stop","layer2":{"executor_vendor":"openai","reviewer_vendor":"anthropic","self_review":false}}'
 
 # A stub standing in for an installed validator. It accepts or refuses on
 # command, so the "validator present" arm is exercised on a machine that does

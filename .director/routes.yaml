@@ -1,21 +1,34 @@
 # The ONLY file in this project naming a provider, model, quota, or price.
 # Filled from what the CLIs reported on 2026-07-25 (blueprint §7.2, §7.3).
 # preflight refuses to launch on an unresolved alias or a stale entry.
+#
+# runs_as: the account the route executes under. Two values:
+#   operator      — the invoking account, with the operator's unrestricted network.
+#   director-exec — the restricted account the measured egress boundary applies to.
+# preflight compares this against the effective user and fails the route when they
+# disagree. A route claiming director-exec must prove it or preflight refuses to
+# launch. This exists because the registry has asserted containment it did not have
+# three times, and twice a human caught it after merge.
 
 routes:
+  # vendor is the authoritative source for the handoff Layer 2 record.
   ORCH_PRIMARY:
     tool: claude
+    vendor: anthropic
     version_seen: 2.1.220
     auth: subscription          # Claude Pro, OAuth
     model: default              # harness-selected; the swap drill governs changes
+    runs_as: operator
     note: the only route with hooks
     last_verified: 2026-07-26
 
   ORCH_FALLBACK:
     tool: codex
+    vendor: openai
     version_seen: 0.145.0
     auth: subscription          # "Logged in using ChatGPT"
     model: default
+    runs_as: operator
     enforcement: reduced        # no hooks — treat every change as behavior-changing
     forbidden_models:
       - "gpt-oss-*"
@@ -23,9 +36,13 @@ routes:
 
   EXEC_PRIMARY:
     tool: agy
+    vendor: google
     version_seen: 1.1.8
     auth: subscription          # Google AI Pro, OAuth
     model: gemini-3.6-flash-medium
+    # Not director-exec. exec-jail.sh does not switch accounts, so this route
+    # would run with the operator's unrestricted network if it were unquarantined.
+    runs_as: operator
     # Historical evidence from 2026-07-26, superseded by the 2026-07-28 probe.
     # There is deliberately no runnable invoke: key while the route is quarantined.
     invoke_historical_2026_07_26_do_not_use: "scripts/exec-jail.sh agy -p --sandbox --mode accept-edits --print-timeout 15m"
@@ -103,10 +120,38 @@ routes:
 
   EXEC_STRONG:
     tool: codex
+    vendor: openai
     version_seen: 0.145.0
     auth: subscription
-    model: default
-    invoke: scripts/exec-jail.sh codex exec --sandbox workspace-write --json
+    # Pinned 2026-08-01 at the operator's direction. Was `default`, which resolved
+    # to whatever ~/.codex/config.toml happened to say — a route whose model is a
+    # property of another file's current contents is not a declared model.
+    # Confirmed present in the CLI's own model list on 2026-08-01.
+    model: gpt-5.6-luna
+    reasoning_effort: max
+    # What was actually established on 2026-08-01: the id appears in the CLI's own
+    # model list, and a live jailed run with `-m gpt-5.6-luna` was accepted and
+    # completed a turn. What was NOT established: that the served model is that
+    # model. Asked to name itself, it answered "gpt-5". A self-report is not
+    # evidence — same rule as an executor's exit code (§8.3). No route claims
+    # model_identity_verified, and this one does not either.
+    model_identity_verified: false
+    # Corrected 2026-07-30 — see AGENTS.md §2b. This route runs every unit, and
+    # until now it was described less accurately than the quarantined one.
+    # exec-jail.sh strips gate credentials; it does not switch accounts. So this
+    # route executes under the operator and the measured director-exec egress
+    # boundary does not apply to it.
+    runs_as: operator
+    # Issue #59 adds an operator-owned launcher and structured identity probe.
+    # These are mechanisms for obtaining real evidence; neither changes the
+    # route's account claim before an observed director-exec run is reviewed.
+    account_launcher: scripts/exec-as-account.ps1
+    identity_probe: scripts/restricted-account-probe.ps1
+    # The model and effort are named on the command line, not inherited. An
+    # invocation that relied on the operator's global config would silently
+    # change model whenever that file changed, and the handoff would still
+    # claim this route's declared one.
+    invoke: scripts/exec-jail.sh codex exec --sandbox workspace-write --json -m gpt-5.6-luna -c model_reasoning_effort=max
     # This contract has optional fields by design, but structured output requires every
     # property to be required. Closed properties and validate-result.sh still reject forbidden keys.
     # CORRECTED 2026-07-26. Probed directly under --sandbox workspace-write:
@@ -115,35 +160,32 @@ routes:
     #   gh api user           exit 0  (live authenticated API, repo+workflow)
     # git ls-remote failed only on a schannel credential error, not a network
     # block. Seven units ran on this route on 2026-07-25 with the gate reachable.
+    # EGRESS_OPEN is a property of the ACCOUNT, not of the route. The SID-scoped
+    # deny rules cover director-exec, and runs_as above says this is not that
+    # account. TCP egress from director-exec is closed and measured; UDP/443 is
+    # denied by rule and never observed being denied. Neither fact applies here.
     network: EGRESS_OPEN
     gate_credentials: REMOVED_BY_EXEC_JAIL
     quarantined: false                   # gate closed 2026-07-26 via exec-jail
-    enforcement: "Same control as EXEC_PRIMARY. Verified in a live jailed run: gh unauthenticated, gh api refused, push cannot authenticate."
-    residual_risk: "Egress open. See blueprint 21.8."
+    enforcement: "Same control as EXEC_PRIMARY: credential removal, not account isolation. Verified in a live jailed run: gh unauthenticated, gh api refused, push cannot authenticate. The jail does not constrain the network."
+    residual_risk: "Egress open, because this route runs as the operator. An executor here can fetch and could exfiltrate. Closing it means running as director-exec — issue #59 — not tightening the jail."
     use: "DE FACTO PRIMARY as of 2026-07-26. Eleven units have run here; zero on EXEC_PRIMARY. EXEC_PRIMARY remains quarantined because egress is open and its jail has not been probed. Escalation semantics are retained for when EXEC_PRIMARY becomes usable."
     jail_verified: true                  # probed live 2026-07-26: gh dead, push cannot authenticate
-    last_verified: 2026-07-26
+    last_verified: 2026-08-01
 
-  EXEC_LOCAL:
-    tool: lmstudio
-    auth: local
-    model: gemma-4-12b-agentic-fable5-composer2.5-v2-3.5x-tau2
-    quant: Q4_K_M
-    size_gb: 7.38
-    state: absent               # absent | candidate | active — §17.1
-    blocked_by:
-      - capability test not run
-      - hermes-codex-harness still Phase-0 only
-      - capacity has never bound
-      - pipeline Phase 4 incomplete
-    last_verified: 2026-07-26
+# EXEC_LOCAL was removed 2026-08-01. It had state: absent, had never run a unit,
+# was blocked by four unmet conditions, and was still named in the gate's list of
+# authorised routes — a result declaring it passed route authorisation. The
+# registry now lists only routes that could be selected. Git history and the
+# failure records keep the reasons it was tried and abandoned.
 
 # Capacity states — blueprint §7.4. Set by hand in .director/current-handoff.json;
 # operator judgement outranks inference. Detection is reactive: we learn we are
 # out by being refused.
 capacity_states:
-  A:  { orchestrator: ORCH_PRIMARY,  executor: EXEC_PRIMARY, layer2: cross-vendor, auto_merge: allowed }
-  B:  { orchestrator: ORCH_FALLBACK, executor: EXEC_PRIMARY, layer2: cross-vendor, auto_merge: allowed }
-  C:  { orchestrator: ORCH_PRIMARY,  executor: EXEC_STRONG,  layer2: cross-vendor, auto_merge: allowed }
+  # auto_merge is forbidden in every state: the capability was removed, not gated.
+  A:  { orchestrator: ORCH_PRIMARY,  executor: EXEC_PRIMARY, layer2: cross-vendor, auto_merge: forbidden }
+  B:  { orchestrator: ORCH_FALLBACK, executor: EXEC_PRIMARY, layer2: cross-vendor, auto_merge: forbidden }
+  C:  { orchestrator: ORCH_PRIMARY,  executor: EXEC_STRONG,  layer2: cross-vendor, auto_merge: forbidden }
   C_prime: { orchestrator: ORCH_PRIMARY, executor: DIRECT,   layer2: SELF-REVIEW,  auto_merge: forbidden }
   D:  { action: publish handoff and stop }

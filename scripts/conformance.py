@@ -27,6 +27,12 @@ WORKTREE_SOURCE = ROOT / "scripts" / "worktree.sh"
 PREFLIGHT_SOURCE = ROOT / "scripts" / "preflight.sh"
 JAIL = ROOT / "scripts" / "exec-jail.sh"
 BASH = shutil.which("bash")
+POWERSHELL = shutil.which("powershell.exe") or shutil.which("powershell")
+RESTRICTED_ACCOUNT_PROBE = ROOT / "scripts" / "restricted-account-probe.ps1"
+RESTRICTED_ACCOUNT_LAUNCHER = ROOT / "scripts" / "exec-as-account.ps1"
+RESTRICTED_ACCOUNT_WRAPPER = ROOT / "scripts" / "run-restricted-account-probe.ps1"
+RESTRICTED_ACCOUNT_LOGIN_RUNNER = ROOT / "scripts" / "login-and-run-restricted-probe.ps1"
+RESTRICTED_ACCOUNT_CLEAN_BOOTSTRAP = ROOT / "scripts" / "clean-restricted-account-probe.ps1"
 
 
 @dataclass
@@ -130,13 +136,22 @@ class ValidatorFixture:
         for relative_path, content in files.items():
             write_text(self.worktree / relative_path, content)
 
-    def write_packet(self, allowed_paths: Iterable[str], required_tests: Iterable[str]) -> None:
+    def write_packet(
+        self,
+        allowed_paths: Iterable[str],
+        required_tests: Iterable[str],
+        forbidden_paths: Iterable[str] = (),
+    ) -> None:
         allowed = list(allowed_paths)
         tests = list(required_tests)
+        forbidden = list(forbidden_paths)
         if not allowed:
             raise RuntimeError("fixture packet requires declared paths")
         packet = ["allowed_paths:"]
         packet.extend(f"  - {path}" for path in allowed)
+        if forbidden:
+            packet.append("forbidden_paths:")
+            packet.extend(f"  - {path}" for path in forbidden)
         packet.append("required_tests:")
         packet.extend(f"  - {test}" for test in tests)
         write_text(self.run_directory / "packet.yaml", "\n".join(packet) + "\n")
@@ -515,22 +530,156 @@ def scenario_result_route_used_closed_enum() -> tuple[bool, str]:
         return False, f"fixture could not be built or exercised: {error}"
 
 
+def scenario_removed_route_is_not_authorised() -> tuple[bool, str]:
+    """EXEC_LOCAL was deleted; a result declaring it must not pass authorisation."""
+    try:
+        with ValidatorFixture("removed-route-rejected") as fixture:
+            fixture.modify_files({"allowed.txt": "in scope\n"})
+            fixture.write_packet(["allowed.txt"], [])
+            fixture.write_raw_result(
+                {
+                    "status": "completed",
+                    "branch": "task/removed-route-rejected",
+                    "route_used": "EXEC_LOCAL",
+                    "summary": "conformance fixture",
+                }
+            )
+            return expect_validator_reject(
+                fixture, "route_used=EXEC_LOCAL is not allowed"
+            )
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
+def scenario_forbidden_paths_deny_before_allow() -> tuple[bool, str]:
+    """A deny glob beats an allow glob that also matches the same file."""
+    try:
+        with ValidatorFixture("deny-beats-allow") as fixture:
+            fixture.modify_files({"scripts/gate.sh": "executor edited the gate\n"})
+            fixture.write_packet(["scripts/*"], [], forbidden_paths=["scripts/gate.sh"])
+            fixture.write_result([])
+            passed, reason = expect_validator_reject(
+                fixture, "files changed inside forbidden_paths — REJECT:"
+            )
+            if not passed:
+                return False, reason
+            output = fixture.validate().output
+            if "scripts/gate.sh (matched forbidden_paths glob: scripts/gate.sh)" not in output:
+                return False, "rejection did not name the path and the deny glob that matched it"
+        return True, "a path matching both lists is denied, and the matching glob is named"
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
+def scenario_forbidden_paths_ambiguous_declaration() -> tuple[bool, str]:
+    """The same glob in both lists is rejected, not resolved in either direction."""
+    try:
+        with ValidatorFixture("ambiguous-scope") as fixture:
+            fixture.modify_files({"allowed.txt": "in scope by one reading\n"})
+            fixture.write_packet(["allowed.txt"], [], forbidden_paths=["allowed.txt"])
+            fixture.write_result([])
+            return expect_validator_reject(
+                fixture,
+                "ambiguous scope declaration — the same path is in both allowed_paths "
+                "and forbidden_paths — REJECT:",
+            )
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
+def scenario_forbidden_paths_no_match_still_validates() -> tuple[bool, str]:
+    """A deny list that matches nothing must not narrow an otherwise valid unit."""
+    try:
+        with ValidatorFixture("deny-list-unmatched") as fixture:
+            fixture.modify_files({"allowed.txt": "ordinary in-scope change\n"})
+            fixture.write_packet(["allowed.txt"], [], forbidden_paths=[".github/*"])
+            fixture.write_result([])
+            return expect_validator_accept(
+                fixture, "all changed files within declared paths and outside forbidden_paths"
+            )
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
+def scenario_required_tests_take_no_shell() -> tuple[bool, str]:
+    """Metacharacters in a required test are arguments, not a second command."""
+    try:
+        with ValidatorFixture("required-tests-no-shell") as fixture:
+            fixture.modify_files({"allowed.txt": "in scope\n"})
+            side_effect = fixture.worktree / "SIDE-EFFECT.txt"
+            payload = f"python --version; touch {side_effect.name}"
+            fixture.write_packet(["allowed.txt"], [payload])
+            fixture.write_result([payload])
+            passed, reason = expect_validator_reject(fixture, "re-run FAILED:")
+            if not passed:
+                return False, reason
+            if side_effect.exists():
+                return False, "the metacharacter payload's side effect occurred"
+        return True, "a metacharacter payload fails and produces no side effect"
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
+def scenario_required_tests_are_bounded() -> tuple[bool, str]:
+    """A test that outruns the bound fails the unit instead of hanging the gate."""
+    previous = os.environ.get("DIRECTOR_TEST_TIMEOUT")
+    os.environ["DIRECTOR_TEST_TIMEOUT"] = "2"
+    try:
+        with ValidatorFixture("required-tests-bounded") as fixture:
+            fixture.modify_files({"allowed.txt": "in scope\n"})
+            # No shell, so the -c source has to survive whitespace splitting as
+            # a single token. Nothing interprets the quotes or the parentheses.
+            slow = "python -c __import__('time').sleep(30)"
+            fixture.write_packet(["allowed.txt"], [slow])
+            fixture.write_result([slow])
+            return expect_validator_reject(fixture, "re-run TIMED OUT after 2s:")
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+    finally:
+        if previous is None:
+            os.environ.pop("DIRECTOR_TEST_TIMEOUT", None)
+        else:
+            os.environ["DIRECTOR_TEST_TIMEOUT"] = previous
+
+
+def scenario_required_tests_ordinary_entries_pass() -> tuple[bool, str]:
+    """The two-token shape every packet actually uses still runs and passes."""
+    try:
+        with ValidatorFixture("required-tests-ordinary") as fixture:
+            fixture.modify_files({"allowed.txt": "in scope\n"})
+            fixture.write_packet(["allowed.txt"], ["python --version"])
+            fixture.write_result(["python --version"])
+            passed, reason = expect_validator_accept(fixture, "re-ran: python --version")
+            if not passed:
+                return False, reason
+            evidence = list((fixture.run_directory / "evidence").glob("*.log"))
+            if not evidence:
+                return False, "raw per-test output was not preserved as evidence"
+        return True, "an ordinary two-token entry runs, passes, and leaves its raw output"
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
 def preflight_fixture_routes(primary_block: str) -> str:
+    # Every route must declare runs_as or preflight fails it, so the fixture
+    # supplies the operator default. A block that declares its own identity
+    # keeps it — that is how the identity scenarios below inject a claim.
+    if "runs_as:" not in primary_block:
+        primary_block = "    runs_as: operator\n" + primary_block
     return f"""routes:
   ORCH_PRIMARY:
     model: default
+    runs_as: operator
     last_verified: 2026-07-26
   ORCH_FALLBACK:
     model: default
+    runs_as: operator
     last_verified: 2026-07-26
   EXEC_PRIMARY:
 {primary_block}
   EXEC_STRONG:
     model: default
-    last_verified: 2026-07-26
-  EXEC_LOCAL:
-    model: local
-    state: absent
+    runs_as: operator
     last_verified: 2026-07-26
 """
 
@@ -610,27 +759,24 @@ def scenario_route_availability() -> tuple[bool, str]:
     routes = """routes:
   ORCH_PRIMARY:
     model: default
+    runs_as: operator
     last_verified: 2026-07-26
   ORCH_FALLBACK:
     model: default
+    runs_as: operator
     last_verified: 2026-07-26
   EXEC_PRIMARY:
     model: primary-fixture
+    runs_as: operator
     quarantined: false
     jail_verified: true
     last_verified: 2026-07-26
   EXEC_STRONG:
     model: strong-fixture
+    runs_as: operator
     invoke: scripts/exec-jail.sh strong-fixture
-    quarantined: true
-    jail_verified: false
-    last_verified: 2026-07-26
-  EXEC_LOCAL:
-    model: local-fixture
-    invoke: scripts/exec-jail.sh local-fixture
     quarantined: false
     jail_verified: true
-    state: active
     last_verified: 2026-07-26
 """
     try:
@@ -639,8 +785,7 @@ def scenario_route_availability() -> tuple[bool, str]:
             return False, f"availability declarations made preflight exit {result.returncode}"
         expected_lines = (
             "EXEC_PRIMARY route unusable: invoke key absent",
-            "EXEC_STRONG route unusable: quarantined; jail not verified",
-            "EXEC_LOCAL route usable",
+            "EXEC_STRONG route usable",
         )
         missing = [line for line in expected_lines if line not in result.output]
         if missing:
@@ -654,39 +799,38 @@ def scenario_route_availability_gate() -> tuple[bool, str]:
     all_quarantined_routes = """routes:
   ORCH_PRIMARY:
     model: default
+    runs_as: operator
     last_verified: 2026-07-26
   ORCH_FALLBACK:
     model: default
+    runs_as: operator
     last_verified: 2026-07-26
   EXEC_PRIMARY:
     model: primary-fixture
+    runs_as: operator
     invoke: scripts/exec-jail.sh primary-fixture
     quarantined: true
     jail_verified: true
     last_verified: 2026-07-26
   EXEC_STRONG:
     model: strong-fixture
+    runs_as: operator
     invoke: scripts/exec-jail.sh strong-fixture
     quarantined: true
     jail_verified: true
-    last_verified: 2026-07-26
-  EXEC_LOCAL:
-    model: local-fixture
-    invoke: scripts/exec-jail.sh local-fixture
-    quarantined: true
-    jail_verified: true
-    state: absent
     last_verified: 2026-07-26
 """
     usable_strong_route = all_quarantined_routes.replace(
         """  EXEC_STRONG:
     model: strong-fixture
+    runs_as: operator
     invoke: scripts/exec-jail.sh strong-fixture
     quarantined: true
     jail_verified: true
 """,
         """  EXEC_STRONG:
     model: strong-fixture
+    runs_as: operator
     invoke: scripts/exec-jail.sh strong-fixture
     quarantined: false
     jail_verified: true
@@ -704,6 +848,62 @@ def scenario_route_availability_gate() -> tuple[bool, str]:
         if available.returncode != 0:
             return False, f"preflight rejected a registry with EXEC_STRONG usable: {available.output}"
         return True, "preflight rejects zero usable executor routes and accepts one usable route"
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
+def scenario_runs_as_claim_must_match_effective_user() -> tuple[bool, str]:
+    """A route may not claim the restricted account this session does not have.
+
+    Both directions go through the existing preflight fixture seam: the fixture
+    registry is the input and the process's real user is the comparison, so no
+    mock of the environment is introduced. The suite is not run as director-exec,
+    which is exactly the condition the claim must fail under.
+    """
+    try:
+        effective_user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
+        if effective_user == "director-exec":
+            return None, "suite is running as director-exec; the mismatch direction cannot be exercised"
+
+        claimed = run_preflight_fixture(
+            "    model: gemini-fixture\n    runs_as: director-exec\n    last_verified: 2026-07-26\n"
+        )
+        if claimed.returncode == 0:
+            return False, "preflight accepted a route claiming director-exec from another account"
+        if "EXEC_PRIMARY declares runs_as: director-exec but the effective user is" not in claimed.output:
+            return False, "preflight did not name the identity mismatch"
+
+        # The matching direction asserts a GREEN preflight, so this block also
+        # has to be a usable route — otherwise the run fails on "zero usable
+        # executor routes" and the identity check is never what decided it.
+        matching = run_preflight_fixture(
+            "    model: gemini-fixture\n"
+            "    runs_as: operator\n"
+            "    invoke: scripts/exec-jail.sh gemini-fixture\n"
+            "    quarantined: false\n"
+            "    jail_verified: true\n"
+            "    last_verified: 2026-07-26\n"
+        )
+        if matching.returncode != 0:
+            return False, f"preflight rejected a route whose declared identity matches: {matching.output}"
+        if "EXEC_PRIMARY runs_as operator, matching effective user" not in matching.output:
+            return False, "preflight did not confirm the matching identity"
+        return True, "preflight fails a director-exec claim and passes a matching operator claim"
+    except Exception as error:
+        return False, f"fixture could not be built or exercised: {error}"
+
+
+def scenario_runs_as_is_required() -> tuple[bool, str]:
+    """A route with no declared identity is not a route with a default identity."""
+    try:
+        result = run_preflight_fixture(
+            "    model: gemini-fixture\n    runs_as:\n    last_verified: 2026-07-26\n"
+        )
+        if result.returncode == 0:
+            return False, "preflight accepted a route with no declared runs_as"
+        if "EXEC_PRIMARY has no usable runs_as" not in result.output:
+            return False, "preflight did not name the missing identity declaration"
+        return True, "preflight rejects a route that declares no identity"
     except Exception as error:
         return False, f"fixture could not be built or exercised: {error}"
 
@@ -867,6 +1067,266 @@ def scenario_five() -> tuple[Optional[bool], str]:
     return True, "gate capability absent; unjailed baseline authenticated; egress remains open (documented residual)"
 
 
+def scenario_restricted_account_probe_self_test() -> tuple[Optional[bool], str]:
+    """Verify the local #59 probe mechanics without claiming account proof."""
+    if POWERSHELL is None:
+        return None, "SKIPPED: PowerShell is required for the restricted-account probe self-test"
+    if not RESTRICTED_ACCOUNT_PROBE.is_file():
+        return False, "required scripts/restricted-account-probe.ps1 is missing"
+    try:
+        result = run(
+            [
+                POWERSHELL,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(RESTRICTED_ACCOUNT_PROBE),
+                "-SelfTest",
+            ],
+            ROOT,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return False, f"restricted-account probe self-test could not run: {error}"
+    required = (
+        "self-test: redaction OK",
+        "self-test: identity guard OK",
+        "self-test: SID guard OK",
+        "self-test: engine ",
+        "self-test: credential refusal guard OK",
+        "self-test: GH config isolation OK",
+        "self-test: smoke helper OK",
+        "self-test: does not establish director-exec",
+        "restricted-account-probe self-test PASSED",
+    )
+    missing = [marker for marker in required if marker not in result.output]
+    if result.returncode != 0 or missing:
+        detail = f"exit {result.returncode}"
+        if missing:
+            detail += "; missing: " + ", ".join(missing)
+        return False, detail
+    return True, "#59 probe self-test passed; it explicitly does not establish director-exec"
+
+
+def scenario_restricted_account_launcher_prompt_contract() -> tuple[bool, str]:
+    """Guard the launcher prompt and its protected cleanup ordering."""
+    if not RESTRICTED_ACCOUNT_LAUNCHER.is_file():
+        return False, "required scripts/exec-as-account.ps1 is missing"
+    try:
+        source = RESTRICTED_ACCOUNT_LAUNCHER.read_text(encoding="utf-8")
+    except OSError as error:
+        return False, f"launcher source could not be read: {error}"
+
+    forbidden = (
+        "Get-Credential",
+        "ConvertFrom-SecureString",
+        "ConvertTo-PlainText",
+        "SecureStringToBSTR",
+    )
+    found = [marker for marker in forbidden if marker in source]
+    if found:
+        return False, "launcher contains forbidden credential handling: " + ", ".join(found)
+
+    try:
+        outer_try = source.index("\ntry {\n")
+        finally_block = source.index("\n} finally {\n", outer_try)
+        post_finally = source.index("\nif ($null -ne $primaryError)", finally_block)
+        guard = source.index("if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected)")
+        prompt = source.index("Read-Host -Prompt", guard)
+        launch_command = source.index("$resolvedLaunchCommand =")
+        launch_command_length = source.index(
+            "$resolvedLaunchCommandLength = $resolvedLaunchCommand.Length", launch_command
+        )
+        command_limit = source.index(
+            "if ($resolvedLaunchCommandLength -gt 1024)", launch_command_length
+        )
+        temp_marker_false = source.index("$temporaryCreated = $false")
+        candidate_guard = source.index("if (Test-Path -LiteralPath $temporary)", temp_marker_false)
+        temp_create = source.index(
+            "New-Item -ItemType Directory -Path $temporary -Force -ErrorAction Stop",
+            candidate_guard,
+        )
+        temp_marker_true = source.index("$temporaryCreated = $true", temp_create)
+        launch = source.index("$child = Start-Process @startParameters", temp_create)
+        credential_clear = source.index("$credential = $null", launch)
+        parameters_clear = source.index("$startParameters = $null", launch)
+        dispose = source.index("$securePassword.Dispose()", finally_block)
+        temp_cleanup = source.index("if ($temporaryCreated -and $null -ne $temporary", finally_block)
+        primary_guard = source.index("if ($null -ne $primaryError)", post_finally)
+        cleanup_guard = source.index("if ($null -ne $cleanupError -and", primary_guard)
+        child_guard = source.index("if ($null -ne $childExitCode)", cleanup_guard)
+    except ValueError as error:
+        return False, f"launcher ordering contract is incomplete: {error}"
+
+    initializations = (
+        "$securePassword = $null",
+        "$credential = $null",
+        "$temporary = $null",
+        "$stdoutPath = $null",
+        "$stderrPath = $null",
+        "$child = $null",
+        "$startParameters = $null",
+        "$temporaryCreated = $false",
+    )
+    if any(source.index(marker) > outer_try for marker in initializations):
+        return False, "launcher state is not initialized before the protected scope"
+    if not (
+        temp_marker_false
+        < outer_try
+        < guard
+        < prompt
+        < candidate_guard
+        < temp_create
+        < temp_marker_true
+        < finally_block
+    ):
+        return False, "prompt and temporary directory creation are not inside the protected scope"
+    if "if ($ArgumentList.Length -gt 1024)" in source:
+        return False, "launcher still limits ArgumentList without the resolved executable path"
+    if not (launch_command < launch_command_length < command_limit < prompt):
+        return False, "complete credentialed launch command is not bounded before Read-Host"
+    launch_guard_source = source[launch_command:prompt]
+    if "$resolvedFilePath" not in launch_guard_source or "$ArgumentList" not in launch_guard_source:
+        return False, "launch command guard does not include both executable path and argument list"
+    if "maximum 1024" not in launch_guard_source or "tracked -File bootstrap" not in launch_guard_source:
+        return False, "complete launch-command rejection lacks a bounded diagnostic and tracked -File remediation"
+    if not (launch < credential_clear and launch < parameters_clear):
+        return False, "credential references are not cleared after launch"
+    cleanup_source = source[finally_block:post_finally]
+    if dispose >= post_finally or temp_cleanup <= dispose:
+        return False, "secure password disposal is not first and protected in cleanup"
+    if cleanup_source.count("$cleanupError = $_") < 3:
+        return False, "cleanup failures are not captured without masking the primary error"
+    if not (primary_guard < cleanup_guard < child_guard):
+        return False, "primary error, cleanup failure, and child exit-code precedence is not preserved"
+    candidate = Path(tempfile.mkdtemp(prefix="director-existing-candidate-"))
+    try:
+        owned = False
+        try:
+            if candidate.exists():
+                raise FileExistsError("pre-existing candidate")
+            candidate.mkdir()
+            owned = True
+        except FileExistsError:
+            pass
+        finally:
+            if owned and candidate.exists():
+                shutil.rmtree(candidate)
+        if not candidate.is_dir():
+            return False, "pre-existing candidate was removed by the ownership model"
+    finally:
+        if candidate.exists():
+            shutil.rmtree(candidate)
+    return True, "#59 launcher bounds the complete credentialed command before prompt and preserves protected cleanup"
+
+
+def scenario_restricted_account_continuation_contract() -> tuple[bool, str]:
+    """Guard the short clean-clone continuation and proof-path invariants."""
+    paths = (
+        RESTRICTED_ACCOUNT_WRAPPER,
+        RESTRICTED_ACCOUNT_LOGIN_RUNNER,
+        RESTRICTED_ACCOUNT_PROBE,
+        RESTRICTED_ACCOUNT_CLEAN_BOOTSTRAP,
+    )
+    if any(not path.is_file() for path in paths):
+        return False, "required #59 continuation script is missing"
+    try:
+        wrapper = RESTRICTED_ACCOUNT_WRAPPER.read_text(encoding="utf-8")
+        login = RESTRICTED_ACCOUNT_LOGIN_RUNNER.read_text(encoding="utf-8")
+        probe = RESTRICTED_ACCOUNT_PROBE.read_text(encoding="utf-8")
+        bootstrap = RESTRICTED_ACCOUNT_CLEAN_BOOTSTRAP.read_text(encoding="utf-8")
+    except OSError as error:
+        return False, f"#59 continuation source could not be read: {error}"
+
+    if "EncodedCommand" in wrapper or "-EncodedCommand" in wrapper:
+        return False, "run-restricted-account-probe still embeds an encoded payload"
+    required_wrapper = (
+        "-File `\"$childScriptPath`\"",
+        "-RestrictedLoginChild",
+        "director-core-issue-59",
+        "Get-ResolvedCommit",
+        "ExpectedCommit",
+        "^[0-9a-fA-F]{40}$",
+    )
+    missing = [marker for marker in required_wrapper if marker not in wrapper]
+    if missing:
+        return False, "clean-clone bootstrap contract is incomplete: " + ", ".join(missing)
+    if "-ExecutorPath" in wrapper or "-ExecutorBinDirectory" in wrapper:
+        return False, "wrapper still injects an operator executor path"
+
+    required_login = (
+        'Get-Command -Name "git"',
+        'Get-Command -Name "codex"',
+        "restricted account's own PATH",
+    )
+    missing = [marker for marker in required_login if marker not in login]
+    if missing:
+        return False, "restricted login PATH resolution contract is incomplete: " + ", ".join(missing)
+    if "ExecutorPath" in login or "ExecutorBinDirectory" in login:
+        return False, "login runner accepts operator executable injection"
+
+    required_bootstrap = (
+        'Get-Command -Name $Name',
+        "clone --branch $Branch --single-branch",
+        "$git.Source clone --branch $Branch --single-branch $Remote $target",
+        "$target.StartsWith($profileRoot + \"\\\", [StringComparison]::OrdinalIgnoreCase)",
+        "ExpectedCommit",
+        "ExpectedSid",
+        "status --porcelain --untracked-files=all",
+        "owner_before_scope",
+        "Invoke-Icacls -Arguments @($target, \"/setowner\", $UserName, \"/T\", \"/C\")",
+        "Invoke-Icacls -Arguments @($target, \"/grant\", \"${UserName}:(OI)(CI)M\", \"/T\", \"/C\")",
+        "ownerAfterScope",
+        "clean-clone-preflight.json",
+        "login-and-run-restricted-probe.ps1",
+        'Join-Path $env:LOCALAPPDATA "Programs\\OpenAI\\Codex\\bin\\codex.exe"',
+        'Get-Command -Name "codex" -CommandType Application',
+        "--version",
+        '[Environment]::GetEnvironmentVariable("Path", "Machine")',
+        '[Environment]::SetEnvironmentVariable("Path", $updatedMachinePath, "Machine")',
+        "$env:Path",
+        "registry write failed",
+    )
+    missing = [marker for marker in required_bootstrap if marker not in bootstrap]
+    if missing:
+        return False, "clean-clone bootstrap contract is incomplete: " + ", ".join(missing)
+    if (
+        "--untracked-files=no" in bootstrap
+        or "EncodedCommand" in bootstrap
+        or "ExecutorPath" in bootstrap
+        or "ExecutorBinDirectory" in bootstrap
+        or "safe.directory=" in bootstrap
+    ):
+        return False, "clean-clone bootstrap injects an operator path or safe.directory"
+
+    forbidden_probe = ("safe.directory=", "Add-ExecutableDirectoryToPath", "ExecutorBinDirectory")
+    found = [marker for marker in forbidden_probe if marker in probe]
+    if found:
+        return False, "restricted proof path retains forbidden injection: " + ", ".join(found)
+    required_probe = (
+        "Get-RepositoryEvidence",
+        "path = $RepositoryPath",
+        "owner = $owner",
+        "owner_error = $ownerError",
+        "remote = ([string]$remote.output).Trim()",
+        "remote_exit_code",
+        "commit_sha = $commitSha",
+        "commit_exit_code",
+        "expected_commit = $ExpectedCommit",
+        "status_exit_code",
+        "status_clean",
+        "precondition_failure",
+        "dubious ownership",
+        "artifact_removed",
+        "owner_matches_expected",
+        "status_scope",
+    )
+    missing = [marker for marker in required_probe if marker not in probe]
+    if missing:
+        return False, "restricted evidence contract is incomplete: " + ", ".join(missing)
+    return True, "#59 continuation uses a short tracked bootstrap and identity-safe proof paths"
+
+
 def report(number: int, passed: Optional[bool], reason: str) -> bool:
     """Print one scenario outcome and report whether it blocks the suite.
 
@@ -904,6 +1364,18 @@ def main() -> int:
         scenario_blocked_states_what_it_hit(),
         scenario_route_availability(),
         scenario_route_availability_gate(),
+        scenario_forbidden_paths_deny_before_allow(),
+        scenario_forbidden_paths_ambiguous_declaration(),
+        scenario_forbidden_paths_no_match_still_validates(),
+        scenario_runs_as_claim_must_match_effective_user(),
+        scenario_runs_as_is_required(),
+        scenario_required_tests_take_no_shell(),
+        scenario_required_tests_are_bounded(),
+        scenario_required_tests_ordinary_entries_pass(),
+        scenario_removed_route_is_not_authorised(),
+        scenario_restricted_account_probe_self_test(),
+        scenario_restricted_account_launcher_prompt_contract(),
+        scenario_restricted_account_continuation_contract(),
     )
     all_passed = True
     for index, (passed, reason) in enumerate(outcomes, 1):

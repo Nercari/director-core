@@ -27,10 +27,10 @@
     "base_commit": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
     "change_class": {
       "enum": ["green-path", "behavior"],
-      "description": "Decides auto-merge eligibility. Ambiguous means behavior."
+      "description": "Declared intent of the change. Auto-merge is off, so this gates nothing mechanically; it sets review expectations. Ambiguous means behavior."
     },
     "route": {
-      "enum": ["EXEC_PRIMARY", "EXEC_STRONG", "EXEC_LOCAL", "DIRECT"]
+      "enum": ["EXEC_PRIMARY", "EXEC_STRONG", "DIRECT"]
     },
     "objective": { "type": "string", "minLength": 1 },
     "acceptance_criteria": {

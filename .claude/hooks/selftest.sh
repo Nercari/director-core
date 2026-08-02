@@ -42,6 +42,41 @@ restore_control_files() {
 # controls, so EXIT always restores their prior state, including on failure.
 trap restore_control_files EXIT
 
+HOOK_PATH="$PATH"
+
+# Exercise both require-handoff branches even when check-jsonschema is absent
+# locally or installed by CI. The stub only selects the branch; the hook still
+# performs the Layer 2 checks itself.
+stub_dir() {
+  local mode="$1" dir
+  dir="$CONTROL_DIR/check-jsonschema-$mode"
+  mkdir -p "$dir"
+  {
+    printf '#!/usr/bin/env bash\n'
+    if [ "$mode" = accept ]; then printf 'exit 0\n'; else printf 'exit 1\n'; fi
+  } > "$dir/check-jsonschema"
+  chmod +x "$dir/check-jsonschema"
+  printf '%s' "$dir"
+}
+
+absent_path() {
+  local real dir entry out=""
+  real="$(command -v check-jsonschema 2>/dev/null || true)"
+  if [ -z "$real" ]; then printf '%s' "$PATH"; return; fi
+  dir="$(cd "$(dirname "$real")" && pwd)"
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    if [ -d "$entry" ] && [ "$(cd "$entry" && pwd)" = "$dir" ]; then continue; fi
+    out="${out:+$out:}$entry"
+  done < <(printf '%s' "$PATH" | tr ':' '\n')
+  printf '%s' "$out"
+}
+
+ABSENT_PATH="$(absent_path)"
+PRESENT_PATH="$(stub_dir accept):$PATH"
+
+VALID_HANDOFF='{"published_at":"2026-07-27T00:00:00Z","run_id":"selftest","capacity_state":"A","objective":"exercise the hook","repository_state":{"main_commit":"0123456","open_branches":[],"open_pull_requests":[]},"decisions_taken":[],"next_action":"stop","layer2":{"executor_vendor":"openai","reviewer_vendor":"anthropic","self_review":true}}'
+
 if [ -f "$ACTIVE_FILE" ]; then
   ACTIVE_BACKUP="$CONTROL_DIR/active-worktree"
   cp "$ACTIVE_FILE" "$ACTIVE_BACKUP"
@@ -54,7 +89,7 @@ fi
 # expect_block <label> <hook> <json>
 expect_block() {
   local label="$1" hook="$2" json="$3" code
-  printf '%s' "$json" | bash "$HOOKS/$hook" >/dev/null 2>&1
+  printf '%s' "$json" | PATH="$HOOK_PATH" bash "$HOOKS/$hook" >/dev/null 2>&1
   code=$?
   if [ "$code" -eq 2 ]; then
     printf '  [ OK ]  blocked: %s\n' "$label"
@@ -67,7 +102,7 @@ expect_block() {
 # expect_allow <label> <hook> <json>
 expect_allow() {
   local label="$1" hook="$2" json="$3" code
-  printf '%s' "$json" | bash "$HOOKS/$hook" >/dev/null 2>&1
+  printf '%s' "$json" | PATH="$HOOK_PATH" bash "$HOOKS/$hook" >/dev/null 2>&1
   code=$?
   if [ "$code" -eq 0 ]; then
     printf '  [ OK ]  allowed: %s\n' "$label"
@@ -119,6 +154,53 @@ assert_worktree_active_file() {
 bash_cmd() { printf '{"tool_input":{"command":%s}}' "$(printf '%s' "$1" | jq -Rs .)"; }
 file_path() { printf '{"tool_input":{"file_path":%s}}' "$(printf '%s' "$1" | jq -Rs .)"; }
 
+run_layer2_cases() {
+  local path_label="$1" path_value="$2"
+  HOOK_PATH="$path_value"
+
+  printf '%s\n' "$(printf '%s' "$VALID_HANDOFF" | jq 'del(.layer2)')" > "$HANDOFF_FILE"
+  expect_block "$path_label: layer2 missing" require-handoff.sh '{}'
+
+  printf '%s\n' "$(printf '%s' "$VALID_HANDOFF" | jq 'del(.layer2.executor_vendor)')" > "$HANDOFF_FILE"
+  expect_block "$path_label: layer2.executor_vendor missing" require-handoff.sh '{}'
+
+  printf '%s\n' "$(printf '%s' "$VALID_HANDOFF" | jq 'del(.layer2.reviewer_vendor)')" > "$HANDOFF_FILE"
+  expect_block "$path_label: layer2.reviewer_vendor missing" require-handoff.sh '{}'
+
+  printf '%s\n' "$(printf '%s' "$VALID_HANDOFF" | jq 'del(.layer2.self_review)')" > "$HANDOFF_FILE"
+  expect_block "$path_label: layer2.self_review missing" require-handoff.sh '{}'
+
+  printf '%s\n' "$(printf '%s' "$VALID_HANDOFF" | jq '.layer2.executor_vendor = "vendor-not-recognised"')" > "$HANDOFF_FILE"
+  expect_block "$path_label: executor vendor outside enum" require-handoff.sh '{}'
+
+  printf '%s\n' "$(printf '%s' "$VALID_HANDOFF" | jq '.layer2.reviewer_vendor = "vendor-not-recognised"')" > "$HANDOFF_FILE"
+  expect_block "$path_label: reviewer vendor outside enum" require-handoff.sh '{}'
+
+  printf '%s\n' "$(printf '%s' "$VALID_HANDOFF" | jq '.layer2.self_review = "true"')" > "$HANDOFF_FILE"
+  expect_block "$path_label: self_review is not boolean" require-handoff.sh '{}'
+
+  printf '%s\n' "$VALID_HANDOFF" > "$HANDOFF_FILE"
+  expect_allow "$path_label: two recognised vendors" require-handoff.sh '{}'
+
+  printf '%s\n' "$(printf '%s' "$VALID_HANDOFF" | jq '.layer2.reviewer_vendor = .layer2.executor_vendor')" > "$HANDOFF_FILE"
+  expect_allow "$path_label: identical vendors permitted" require-handoff.sh '{}'
+
+  printf '%s\n' "$(printf '%s' "$VALID_HANDOFF" | jq '.layer2.self_review = false')" > "$HANDOFF_FILE"
+  expect_allow "$path_label: false self_review permitted" require-handoff.sh '{}'
+
+  printf '%s\n' "$(printf '%s' "$VALID_HANDOFF" | jq '.workflow_efficiency = {work_unit_route: null}')" > "$HANDOFF_FILE"
+  expect_allow "$path_label: null work_unit_route skips lookup" require-handoff.sh '{}'
+
+  printf '%s\n' "$(printf '%s' "$VALID_HANDOFF" | jq '.workflow_efficiency = {work_unit_route: "EXEC_STRONG"}')" > "$HANDOFF_FILE"
+  expect_allow "$path_label: route vendor agrees with executor vendor" require-handoff.sh '{}'
+
+  printf '%s\n' "$(printf '%s' "$VALID_HANDOFF" | jq '.workflow_efficiency = {work_unit_route: "ORCH_PRIMARY"}')" > "$HANDOFF_FILE"
+  expect_block "$path_label: route vendor disagrees with executor vendor" require-handoff.sh '{}'
+
+  printf '%s\n' "$(printf '%s' "$VALID_HANDOFF" | jq '.workflow_efficiency = {work_unit_route: "DIRECT"}')" > "$HANDOFF_FILE"
+  expect_block "$path_label: route has no vendor key" require-handoff.sh '{}'
+}
+
 echo "hook selftest"
 echo
 echo "block-dangerous-bash — must refuse"
@@ -126,6 +208,9 @@ expect_block "push to main"           block-dangerous-bash.sh "$(bash_cmd 'git p
 expect_block "force push"             block-dangerous-bash.sh "$(bash_cmd 'git push --force origin task/x')"
 expect_block "reset --hard"           block-dangerous-bash.sh "$(bash_cmd 'git reset --hard HEAD~3')"
 expect_block "immediate pr merge"     block-dangerous-bash.sh "$(bash_cmd 'gh pr merge 4 --squash')"
+# Replaces an expect_allow. Auto-merge is off; a silent revert of that removal
+# fails here rather than being noticed after a pull request merges itself.
+expect_block "ARM auto-merge"         block-dangerous-bash.sh "$(bash_cmd 'gh pr merge 4 --auto --squash')"
 expect_block "self-approve"           block-dangerous-bash.sh "$(bash_cmd 'gh pr review 4 --approve')"
 expect_block "API key in command"     block-dangerous-bash.sh "$(bash_cmd 'OPENAI_API_KEY=sk-x codex exec "hi"')"
 expect_block "agent with no timeout"  block-dangerous-bash.sh "$(bash_cmd 'agy -p "do the thing"')"
@@ -136,7 +221,6 @@ expect_block "claude bare"             block-dangerous-bash.sh "$(bash_cmd 'time
 echo
 echo "block-dangerous-bash — must permit"
 expect_allow "push a task branch"     block-dangerous-bash.sh "$(bash_cmd 'git push -u origin task/demo')"
-expect_allow "ARM auto-merge"         block-dangerous-bash.sh "$(bash_cmd 'gh pr merge 4 --auto --squash')"
 expect_allow "agent with timeout"     block-dangerous-bash.sh "$(bash_cmd 'timeout 900 scripts/exec-jail.sh agy -p --print-timeout 15m "do it"')"
 expect_allow "codex through jail"     block-dangerous-bash.sh "$(bash_cmd 'timeout 900 scripts/exec-jail.sh codex exec --sandbox workspace-write "do it"')"
 expect_allow "claude without jail"    block-dangerous-bash.sh "$(bash_cmd 'timeout 900 claude -p "do it"')"
@@ -163,13 +247,29 @@ expect_allow "vault 01_Inbox"         block-out-of-scope-write.sh "$(file_path '
 
 echo
 echo "active-worktree lifecycle and hooks"
+rm -f "$ACTIVE_FILE" "$HANDOFF_FILE"
+HOOK_PATH="$ABSENT_PATH"
+expect_allow "no unit in flight exits 0 without a handoff" require-handoff.sh '{}'
 ACTIVE_ROOT="$ROOT/.selftest-active-worktree"
 printf '%s\n' "$ACTIVE_ROOT" > "$ACTIVE_FILE"
 expect_block "outside active worktree" block-out-of-scope-write.sh "$(file_path "$ROOT/outside-active-worktree.txt")"
 expect_allow "inside active worktree"  block-out-of-scope-write.sh "$(file_path "$ACTIVE_ROOT/inside.txt")"
 rm -f "$HANDOFF_FILE"
 expect_block "missing handoff in active cycle" require-handoff.sh '{}'
-printf '%s\n' '{"published_at":"2026-07-27T00:00:00Z","run_id":"selftest","capacity_state":"A","objective":"exercise the hook","repository_state":{"main_commit":"0123456","open_branches":[],"open_pull_requests":[]},"decisions_taken":[],"next_action":"stop"}' > "$HANDOFF_FILE"
+
+echo
+echo "require-handoff Layer 2 — validator absent fallback"
+run_layer2_cases "validator absent" "$ABSENT_PATH"
+HOOK_PATH="$ABSENT_PATH"
+printf '%s\n' "$(printf '%s' "$VALID_HANDOFF" | jq '.capacity_state = "Z"')" > "$HANDOFF_FILE"
+expect_block "bad capacity_state still blocked by fallback" require-handoff.sh '{}'
+
+echo
+echo "require-handoff Layer 2 — validator present path"
+run_layer2_cases "validator present" "$PRESENT_PATH"
+
+HOOK_PATH="$ABSENT_PATH"
+printf '%s\n' "$VALID_HANDOFF" > "$HANDOFF_FILE"
 expect_allow "valid handoff in active cycle" require-handoff.sh '{}'
 if assert_worktree_active_file; then
   printf '  [ OK ]  worktree create writes active-worktree and owned remove deletes it\n'
