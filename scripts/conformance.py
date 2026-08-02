@@ -1279,6 +1279,13 @@ def scenario_restricted_account_continuation_contract() -> tuple[bool, str]:
         "ownerAfterScope",
         "clean-clone-preflight.json",
         "login-and-run-restricted-probe.ps1",
+        'Join-Path $env:LOCALAPPDATA "Programs\\OpenAI\\Codex\\bin\\codex.exe"',
+        'Get-Command -Name "codex" -CommandType Application',
+        "--version",
+        '[Environment]::GetEnvironmentVariable("Path", "Machine")',
+        '[Environment]::SetEnvironmentVariable("Path", $updatedMachinePath, "Machine")',
+        "$env:Path",
+        "registry write failed",
     )
     missing = [marker for marker in required_bootstrap if marker not in bootstrap]
     if missing:

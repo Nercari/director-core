@@ -73,6 +73,77 @@ if (-not $operatorPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Ad
     throw "operator elevation is required to set the owner and scoped ACL on the proof clone; remediation: reopen PowerShell as Administrator and rerun this setup"
 }
 
+$officialCodexPath = Join-Path $env:LOCALAPPDATA "Programs\OpenAI\Codex\bin\codex.exe"
+$officialCodexPath = [IO.Path]::GetFullPath($officialCodexPath)
+$codexPath = $null
+if (Test-Path -LiteralPath $officialCodexPath -PathType Leaf) {
+    $codexPath = [IO.Path]::GetFullPath((Get-Item -LiteralPath $officialCodexPath -ErrorAction Stop).FullName)
+}
+else {
+    $codexCommand = Get-Command -Name "codex" -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -ne $codexCommand) {
+        $resolvedCodexPath = [IO.Path]::GetFullPath([string]$codexCommand.Source)
+        $resolvedCodexDirectory = [IO.Path]::GetDirectoryName($resolvedCodexPath)
+        $officialCodexDirectory = [IO.Path]::GetDirectoryName($officialCodexPath)
+        if (
+            [string]::Equals($resolvedCodexDirectory, $officialCodexDirectory, [StringComparison]::OrdinalIgnoreCase) -and
+            [string]::Equals([IO.Path]::GetFileName($resolvedCodexPath), "codex.exe", [StringComparison]::OrdinalIgnoreCase)
+        ) {
+            $codexPath = $resolvedCodexPath
+        }
+    }
+}
+if ($null -eq $codexPath -or -not (Test-Path -LiteralPath $codexPath -PathType Leaf)) {
+    throw "Codex executable is not available at the official operator location: $officialCodexPath"
+}
+$codexVersion = @(& $codexPath --version 2>&1 | ForEach-Object { [string]$_ })
+if ($LASTEXITCODE -ne 0) {
+    throw "Codex executable failed --version: $($codexVersion -join "`n")"
+}
+$codexBinDirectory = [IO.Path]::GetDirectoryName($codexPath)
+
+function Test-PathEntryPresent {
+    param(
+        [AllowEmptyString()][string]$ExistingPath,
+        [Parameter(Mandatory = $true)][string]$Entry
+    )
+    $normalizedEntry = $Entry.Trim().TrimEnd("\")
+    foreach ($existingEntry in @($ExistingPath -split ";")) {
+        if (-not [string]::IsNullOrWhiteSpace($existingEntry)) {
+            $normalizedExistingEntry = $existingEntry.Trim().TrimEnd("\")
+            if ([string]::Equals($normalizedExistingEntry, $normalizedEntry, [StringComparison]::OrdinalIgnoreCase)) {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
+$machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+if (-not (Test-PathEntryPresent -ExistingPath $machinePath -Entry $codexBinDirectory)) {
+    $updatedMachinePath = if ([string]::IsNullOrEmpty($machinePath)) {
+        $codexBinDirectory
+    }
+    else {
+        "$machinePath;$codexBinDirectory"
+    }
+    try {
+        [Environment]::SetEnvironmentVariable("Path", $updatedMachinePath, "Machine")
+    }
+    catch {
+        throw "failed to add Codex bin directory to the machine PATH; registry write failed for ${codexBinDirectory}: $($_.Exception.Message)"
+    }
+}
+if (-not (Test-PathEntryPresent -ExistingPath $env:Path -Entry $codexBinDirectory)) {
+    if ([string]::IsNullOrEmpty($env:Path)) {
+        $env:Path = $codexBinDirectory
+    }
+    else {
+        $env:Path = "$env:Path;$codexBinDirectory"
+    }
+}
+
 $git = Get-Tool -Name "git"
 $workspaceRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..") -ErrorAction Stop).Path
 $accountLauncher = Join-Path $workspaceRoot "scripts\exec-as-account.ps1"
