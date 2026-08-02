@@ -48,15 +48,41 @@ if ($ArgumentList -match '(?i)(gho|ghp|ghs|ghr|github_pat)_[A-Za-z0-9_\-]+|GH_TO
 }
 
 Write-Output "Starting '$resolvedFilePath' as '$UserName'. The password is requested interactively and is not stored by this script."
-$credential = Get-Credential -UserName $UserName -Message "Enter the password for the dedicated restricted executor account. Do not paste API keys here."
-$temporary = Join-Path ([IO.Path]::GetTempPath()) ("director-account-launch-" + [guid]::NewGuid().ToString("N"))
-New-Item -ItemType Directory -Path $temporary -Force | Out-Null
-$stdoutPath = Join-Path $temporary "stdout.txt"
-$stderrPath = Join-Path $temporary "stderr.txt"
+$securePassword = $null
+$credential = $null
+$temporary = $null
+$stdoutPath = $null
+$stderrPath = $null
 $child = $null
+$startParameters = $null
+$temporaryCreated = $false
 $pathKeys = @([Environment]::GetEnvironmentVariables("Process").Keys | Where-Object { $_ -ieq "Path" })
 $pathValue = [Environment]::GetEnvironmentVariable("Path", "Process")
+$childExitCode = $null
+$primaryError = $null
+$cleanupError = $null
 try {
+    if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected) {
+        throw "credential prompt requires an interactive console; refusing noninteractive or redirected input"
+    }
+    try {
+        $securePassword = Read-Host -Prompt "Enter the password for $UserName. Do not paste API keys here." -AsSecureString
+    } catch {
+        throw "credential prompt was cancelled or unavailable; no credential was acquired"
+    }
+    if ($null -eq $securePassword -or $securePassword.Length -eq 0) {
+        throw "credential prompt returned an empty password; refusing to launch"
+    }
+    $credential = [PSCredential]::new($UserName, $securePassword)
+    $temporary = Join-Path ([IO.Path]::GetTempPath()) ("director-account-launch-" + [guid]::NewGuid().ToString("N"))
+    if (Test-Path -LiteralPath $temporary) {
+        throw "temporary launch directory candidate already exists; refusing to reuse it"
+    }
+    New-Item -ItemType Directory -Path $temporary -Force -ErrorAction Stop | Out-Null
+    $temporaryCreated = $true
+    $stdoutPath = Join-Path $temporary "stdout.txt"
+    $stderrPath = Join-Path $temporary "stderr.txt"
+
     # Windows PowerShell 5.1's Start-Process -Credential builds a case-insensitive
     # environment dictionary. Codex can expose both Path and PATH, which makes
     # that API fail before logon. Canonicalize only this duplicate for the child,
@@ -85,6 +111,8 @@ try {
         $startParameters.LoadUserProfile = $true
     }
     $child = Start-Process @startParameters
+    $credential = $null
+    $startParameters = $null
     if (-not $Interactive -and (Test-Path -LiteralPath $stdoutPath)) {
         $output = Get-Content -LiteralPath $stdoutPath -Raw
         if (-not [string]::IsNullOrWhiteSpace($output)) {
@@ -100,16 +128,51 @@ try {
     if ($Interactive) {
         Write-Output ("Interactive restricted-account process exited with code " + [int]$child.ExitCode + ".")
     }
-    exit ([int]$child.ExitCode)
+    $childExitCode = [int]$child.ExitCode
+} catch {
+    $primaryError = $_
 } finally {
-    Remove-Variable -Name credential -ErrorAction SilentlyContinue
-    if ($pathKeys.Count -gt 1) {
-        Remove-Item -LiteralPath "Env:Path" -ErrorAction SilentlyContinue
-        foreach ($key in $pathKeys) {
-            Set-Item -LiteralPath "Env:$key" -Value $pathValue
+    try {
+        if ($null -ne $securePassword) {
+            $securePassword.Dispose()
+        }
+    } catch {
+        if ($null -eq $cleanupError) {
+            $cleanupError = $_
         }
     }
-    if (Test-Path -LiteralPath $temporary) {
-        Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue
+    $securePassword = $null
+    $credential = $null
+    $startParameters = $null
+    try {
+        if ($pathKeys.Count -gt 1) {
+            Remove-Item -LiteralPath "Env:Path" -ErrorAction Stop
+            foreach ($key in $pathKeys) {
+                Set-Item -LiteralPath "Env:$key" -Value $pathValue
+            }
+        }
+    } catch {
+        if ($null -eq $cleanupError) {
+            $cleanupError = $_
+        }
+    }
+    try {
+        if ($temporaryCreated -and $null -ne $temporary -and (Test-Path -LiteralPath $temporary)) {
+            Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction Stop
+        }
+    } catch {
+        if ($null -eq $cleanupError) {
+            $cleanupError = $_
+        }
     }
 }
+if ($null -ne $primaryError) {
+    throw $primaryError
+}
+if ($null -ne $cleanupError -and ($null -eq $childExitCode -or $childExitCode -eq 0)) {
+    throw $cleanupError
+}
+if ($null -ne $childExitCode) {
+    exit $childExitCode
+}
+throw "restricted-account process did not produce an exit code"

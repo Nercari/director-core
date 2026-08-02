@@ -34,11 +34,13 @@ read into the report. Each child probe receives an empty temporary
 GitHub CLI profile.
 
 `scripts/exec-as-account.ps1` is the operator-owned launcher. It requests the
-dedicated account password interactively through `Get-Credential`, starts the
-target directly with `Start-Process -Credential`, redirects output through a
-temporary directory, redacts output, and removes that directory at exit. The
-password is not written to a file, environment variable, argument list, or
-repository artifact.
+dedicated account password through an explicit interactive console
+`Read-Host -AsSecureString` prompt, constructs the fixed-user `PSCredential`,
+starts the target directly with `Start-Process -Credential`, redirects output
+through a temporary directory, redacts output, and removes that directory at
+exit. Redirected or empty input fails before launch. The password is not
+converted to plaintext or written to a file, environment variable, argument
+list, or repository artifact.
 
 The one-step wrapper resolves the local Codex CLI and supplies only its binary
 directory to the restricted child process PATH. It does not copy the calling

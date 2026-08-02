@@ -29,6 +29,7 @@ JAIL = ROOT / "scripts" / "exec-jail.sh"
 BASH = shutil.which("bash")
 POWERSHELL = shutil.which("powershell.exe") or shutil.which("powershell")
 RESTRICTED_ACCOUNT_PROBE = ROOT / "scripts" / "restricted-account-probe.ps1"
+RESTRICTED_ACCOUNT_LAUNCHER = ROOT / "scripts" / "exec-as-account.ps1"
 
 
 @dataclass
@@ -1104,6 +1105,102 @@ def scenario_restricted_account_probe_self_test() -> tuple[Optional[bool], str]:
     return True, "#59 probe self-test passed; it explicitly does not establish director-exec"
 
 
+def scenario_restricted_account_launcher_prompt_contract() -> tuple[bool, str]:
+    """Guard the launcher prompt and its protected cleanup ordering."""
+    if not RESTRICTED_ACCOUNT_LAUNCHER.is_file():
+        return False, "required scripts/exec-as-account.ps1 is missing"
+    try:
+        source = RESTRICTED_ACCOUNT_LAUNCHER.read_text(encoding="utf-8")
+    except OSError as error:
+        return False, f"launcher source could not be read: {error}"
+
+    forbidden = (
+        "Get-Credential",
+        "ConvertFrom-SecureString",
+        "ConvertTo-PlainText",
+        "SecureStringToBSTR",
+    )
+    found = [marker for marker in forbidden if marker in source]
+    if found:
+        return False, "launcher contains forbidden credential handling: " + ", ".join(found)
+
+    try:
+        outer_try = source.index("\ntry {\n")
+        finally_block = source.index("\n} finally {\n", outer_try)
+        post_finally = source.index("\nif ($null -ne $primaryError)", finally_block)
+        guard = source.index("if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected)")
+        prompt = source.index("Read-Host -Prompt", guard)
+        temp_marker_false = source.index("$temporaryCreated = $false")
+        candidate_guard = source.index("if (Test-Path -LiteralPath $temporary)", temp_marker_false)
+        temp_create = source.index(
+            "New-Item -ItemType Directory -Path $temporary -Force -ErrorAction Stop",
+            candidate_guard,
+        )
+        temp_marker_true = source.index("$temporaryCreated = $true", temp_create)
+        launch = source.index("$child = Start-Process @startParameters", temp_create)
+        credential_clear = source.index("$credential = $null", launch)
+        parameters_clear = source.index("$startParameters = $null", launch)
+        dispose = source.index("$securePassword.Dispose()", finally_block)
+        temp_cleanup = source.index("if ($temporaryCreated -and $null -ne $temporary", finally_block)
+        primary_guard = source.index("if ($null -ne $primaryError)", post_finally)
+        cleanup_guard = source.index("if ($null -ne $cleanupError -and", primary_guard)
+        child_guard = source.index("if ($null -ne $childExitCode)", cleanup_guard)
+    except ValueError as error:
+        return False, f"launcher ordering contract is incomplete: {error}"
+
+    initializations = (
+        "$securePassword = $null",
+        "$credential = $null",
+        "$temporary = $null",
+        "$stdoutPath = $null",
+        "$stderrPath = $null",
+        "$child = $null",
+        "$startParameters = $null",
+        "$temporaryCreated = $false",
+    )
+    if any(source.index(marker) > outer_try for marker in initializations):
+        return False, "launcher state is not initialized before the protected scope"
+    if not (
+        temp_marker_false
+        < outer_try
+        < guard
+        < prompt
+        < candidate_guard
+        < temp_create
+        < temp_marker_true
+        < finally_block
+    ):
+        return False, "prompt and temporary directory creation are not inside the protected scope"
+    if not (launch < credential_clear and launch < parameters_clear):
+        return False, "credential references are not cleared after launch"
+    cleanup_source = source[finally_block:post_finally]
+    if dispose >= post_finally or temp_cleanup <= dispose:
+        return False, "secure password disposal is not first and protected in cleanup"
+    if cleanup_source.count("$cleanupError = $_") < 3:
+        return False, "cleanup failures are not captured without masking the primary error"
+    if not (primary_guard < cleanup_guard < child_guard):
+        return False, "primary error, cleanup failure, and child exit-code precedence is not preserved"
+    candidate = Path(tempfile.mkdtemp(prefix="director-existing-candidate-"))
+    try:
+        owned = False
+        try:
+            if candidate.exists():
+                raise FileExistsError("pre-existing candidate")
+            candidate.mkdir()
+            owned = True
+        except FileExistsError:
+            pass
+        finally:
+            if owned and candidate.exists():
+                shutil.rmtree(candidate)
+        if not candidate.is_dir():
+            return False, "pre-existing candidate was removed by the ownership model"
+    finally:
+        if candidate.exists():
+            shutil.rmtree(candidate)
+    return True, "#59 launcher has ordered protected prompt/temp setup and non-masking cleanup"
+
+
 def report(number: int, passed: Optional[bool], reason: str) -> bool:
     """Print one scenario outcome and report whether it blocks the suite.
 
@@ -1151,6 +1248,7 @@ def main() -> int:
         scenario_required_tests_ordinary_entries_pass(),
         scenario_removed_route_is_not_authorised(),
         scenario_restricted_account_probe_self_test(),
+        scenario_restricted_account_launcher_prompt_contract(),
     )
     all_passed = True
     for index, (passed, reason) in enumerate(outcomes, 1):
