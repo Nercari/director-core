@@ -635,3 +635,19 @@ one. Written through the file-edit tool instead, which the hook does not inspect
 The finding is about where the control lives: a restriction enforced by string
 matching on one harness's command line is not an isolation property, and cannot
 become one by being written more strictly.
+
+## 2026-08-01 - issue #59 - account launch did not establish login
+
+Two account-launch failures were observed in the operator session:
+
+1. A long encoded PowerShell command passed through `Start-Process -Credential`
+   reached the secure password prompt and then failed with `The parameter is
+   incorrect`.
+2. A long `runas` login continuation returned without opening the expected
+   interactive window; a later attempt exited 0 without proving a child window.
+   The account login was therefore not established.
+
+The root cause was an oversized, fragile credentialed command payload. The
+remediation now added is a pre-prompt complete command-length guard, a tracked
+short `-File` bootstrap, and an operator-side clean clone. This is evidence for
+the correction, not proof of full issue-59 acceptance.

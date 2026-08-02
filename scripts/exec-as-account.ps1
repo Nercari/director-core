@@ -46,6 +46,14 @@ if (-not (Test-Path -LiteralPath $WorkingDirectory -PathType Container)) {
 if ($ArgumentList -match '(?i)(gho|ghp|ghs|ghr|github_pat)_[A-Za-z0-9_\-]+|GH_TOKEN\s*=|GITHUB_TOKEN\s*=|OPENAI_API_KEY\s*=|ANTHROPIC_API_KEY\s*=') {
     throw "refusing to pass credential-shaped material to the restricted account"
 }
+$resolvedLaunchCommand = '"' + $resolvedFilePath + '"'
+if (-not [string]::IsNullOrWhiteSpace($ArgumentList)) {
+    $resolvedLaunchCommand += " " + $ArgumentList
+}
+$resolvedLaunchCommandLength = $resolvedLaunchCommand.Length
+if ($resolvedLaunchCommandLength -gt 1024) {
+    throw "credentialed launch command is too long ($resolvedLaunchCommandLength characters; maximum 1024). Remediation: invoke the tracked -File bootstrap instead of embedding a long command payload"
+}
 
 Write-Output "Starting '$resolvedFilePath' as '$UserName'. The password is requested interactively and is not stored by this script."
 $securePassword = $null

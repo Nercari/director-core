@@ -6,7 +6,7 @@ param(
     [string]$WorkingDirectory = (Get-Location).Path,
     [string]$Repository,
     [string]$ExecutorCommand = "codex",
-    [string]$ExecutorBinDirectory,
+    [string]$ExpectedCommit,
     [string]$OutputPath
 )
 
@@ -211,28 +211,6 @@ function Resolve-Executable {
     return [string]$command.Source
 }
 
-function Add-ExecutableDirectoryToPath {
-    param([string]$Directory)
-
-    if ([string]::IsNullOrWhiteSpace($Directory)) {
-        return ""
-    }
-    if (-not (Test-Path -LiteralPath $Directory -PathType Container)) {
-        throw "executor binary directory does not exist: $Directory"
-    }
-
-    $resolved = (Resolve-Path -LiteralPath $Directory -ErrorAction Stop).Path
-    $currentPath = [Environment]::GetEnvironmentVariable("Path", "Process")
-    $normalized = $resolved.TrimEnd("\\")
-    $alreadyPresent = @($currentPath -split ";" | Where-Object {
-            -not [string]::IsNullOrWhiteSpace($_) -and $_.Trim().TrimEnd("\\") -ieq $normalized
-        }).Count -gt 0
-    if (-not $alreadyPresent) {
-        [Environment]::SetEnvironmentVariable("Path", ($resolved + ";" + $currentPath), "Process")
-    }
-    return $resolved
-}
-
 function Get-ToolEvidence {
     param(
         [string]$Name,
@@ -328,6 +306,9 @@ function Test-CredentialRefusal {
         return $false
     }
     $text = ([string]$Result.output).ToLowerInvariant()
+    if ($text.Contains("dubious ownership") -or $text.Contains("detected dubious ownership")) {
+        return $false
+    }
     foreach ($marker in @(
         "not logged", "gh auth login", "authentication failed", "bad credentials",
         "could not read username", "terminal prompts disabled", "no credentials",
@@ -338,6 +319,100 @@ function Test-CredentialRefusal {
         }
     }
     return $false
+}
+
+function Get-RepositoryEvidence {
+    param(
+        [string]$GitPath,
+        [string]$RepositoryPath
+    )
+
+    $owner = ""
+    $ownerError = ""
+    try {
+        $owner = [string](Get-Acl -LiteralPath $RepositoryPath -ErrorAction Stop).Owner
+    } catch {
+        $ownerError = Redact-Text ([string]$_)
+    }
+
+    $remote = [ordered]@{ exit_code = 1; output = "git or repository directory not found" }
+    $commit = [ordered]@{ exit_code = 1; output = "git or repository directory not found" }
+    $status = [ordered]@{ exit_code = 1; output = "git or repository directory not found" }
+    if ($GitPath -and (Test-Path -LiteralPath $RepositoryPath -PathType Container)) {
+        $remote = Invoke-WithGuardedEnvironment -UnsetProxy {
+            Invoke-CapturedCommand -FilePath $GitPath -ArgumentList @(
+                "-C", $RepositoryPath, "remote", "get-url", "origin"
+            )
+        }
+        $commit = Invoke-WithGuardedEnvironment -UnsetProxy {
+            Invoke-CapturedCommand -FilePath $GitPath -ArgumentList @(
+                "-C", $RepositoryPath, "rev-parse", "--verify", "HEAD"
+            )
+        }
+        $status = Invoke-WithGuardedEnvironment -UnsetProxy {
+            Invoke-CapturedCommand -FilePath $GitPath -ArgumentList @(
+                "-C", $RepositoryPath, "status", "--porcelain", "--untracked-files=all"
+            )
+        }
+    }
+
+    $commitSha = ([string]$commit.output).Trim()
+    $statusText = ([string]$status.output).Trim()
+    $repositoryOutputs = @($remote.output, $commit.output, $status.output)
+    $repositoryPreconditionFailure = @($repositoryOutputs | ForEach-Object {
+        ([string]$_).ToLowerInvariant()
+    } | Where-Object {
+        $_.Contains("dubious ownership") -or $_.Contains("detected dubious ownership")
+    }).Count -gt 0
+    $expectedCommitIsFullSha = $ExpectedCommit -match '^[0-9a-fA-F]{40}$'
+    $allowedStatusPaths = @(
+        ".director/clean-clone-preflight.json",
+        ".director/evidence/restricted-account-probe.json"
+    )
+    $statusLines = @($statusText -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $unexpectedStatus = @()
+    foreach ($line in $statusLines) {
+        $relativePath = if ($line.Length -gt 3) { $line.Substring(3).Trim().Replace("\", "/") } else { "" }
+        if ($allowedStatusPaths -notcontains $relativePath) {
+            $unexpectedStatus += $line
+        }
+    }
+    $manifestPath = Join-Path $RepositoryPath ".director\clean-clone-preflight.json"
+    $manifestPresent = Test-Path -LiteralPath $manifestPath -PathType Leaf
+    $ownerMatchesExpected = Test-ExpectedAccount -ActualAccount $owner -ExpectedAccount $ExpectedUser
+    return [ordered]@{
+        path = $RepositoryPath
+        owner = $owner
+        owner_error = $ownerError
+        owner_matches_expected = $ownerMatchesExpected
+        remote = ([string]$remote.output).Trim()
+        remote_exit_code = [int]$remote.exit_code
+        commit_sha = $commitSha
+        commit_exit_code = [int]$commit.exit_code
+        expected_commit = $ExpectedCommit
+        commit_is_full_sha = ($commitSha -match '^[0-9a-fA-F]{40}$')
+        commit_matches_expected = ($commitSha -ieq $ExpectedCommit)
+        expected_commit_is_full_sha = $expectedCommitIsFullSha
+        status_exit_code = [int]$status.exit_code
+        status = $statusText
+        status_scope = "tracked changes plus allowlisted generated evidence files"
+        unexpected_status = $unexpectedStatus
+        status_clean = ($status.exit_code -eq 0 -and $unexpectedStatus.Count -eq 0)
+        precondition_failure = $repositoryPreconditionFailure
+        clean_clone_manifest_present = $manifestPresent
+        clean_clone = (
+            $ownerMatchesExpected -and
+            $commit.exit_code -eq 0 -and
+            $remote.exit_code -eq 0 -and
+            $status.exit_code -eq 0 -and
+            $unexpectedStatus.Count -eq 0 -and
+            $manifestPresent -and
+            $commitSha -match '^[0-9a-fA-F]{40}$' -and
+            $expectedCommitIsFullSha -and
+            $commitSha -ieq $ExpectedCommit -and
+            -not $repositoryPreconditionFailure
+        )
+    }
 }
 
 function Invoke-SmokeTask {
@@ -421,6 +496,7 @@ function Invoke-GitPushProbe {
             executed = $false
             expected_refusal = $true
             credential_refused = $false
+            precondition_failure = $true
             exit_code = 1
             output = "git or repository directory not found"
         }
@@ -429,7 +505,6 @@ function Invoke-GitPushProbe {
     $branch = "director-exec-probe-" + [guid]::NewGuid().ToString("N")
     $result = Invoke-WithGuardedEnvironment -UnsetProxy {
         Invoke-CapturedCommand -FilePath $GitPath -ArgumentList @(
-            "-c", "safe.directory=$RepositoryPath",
             "-C", $RepositoryPath,
             "-c", "http.proxy=",
             "-c", "https.proxy=",
@@ -440,7 +515,8 @@ function Invoke-GitPushProbe {
     return [ordered]@{
         executed = $true
         expected_refusal = $true
-        credential_refused = (Test-CredentialRefusal $result)
+        credential_refused = $(if (([string]$result.output).ToLowerInvariant().Contains("dubious ownership")) { $false } else { Test-CredentialRefusal $result })
+        precondition_failure = (([string]$result.output).ToLowerInvariant().Contains("dubious ownership"))
         exit_code = $result.exit_code
         output = [string]$result.output
     }
@@ -466,6 +542,16 @@ function New-ProbeEvidence {
     $executor["login"] = $executorLogin
     $gh = Get-ToolEvidence -Name "gh"
     $credentials = Get-CredentialEvidence -GitPath $(if ($git.present) { $git.path } else { "" })
+    $repositoryEvidence = Get-RepositoryEvidence -GitPath $(if ($git.present) { $git.path } else { "" }) -RepositoryPath $Repository
+    $profileRoot = if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+        ""
+    } else {
+        (Resolve-Path -LiteralPath $env:USERPROFILE -ErrorAction SilentlyContinue).Path.TrimEnd("\")
+    }
+    $repositoryUnderProfile = (
+        -not [string]::IsNullOrWhiteSpace($profileRoot) -and
+        $Repository.StartsWith($profileRoot + "\", [StringComparison]::OrdinalIgnoreCase)
+    )
     $smoke = Invoke-SmokeTask -Directory $WorkingDirectory
     $failures = New-Object System.Collections.Generic.List[string]
 
@@ -478,6 +564,24 @@ function New-ProbeEvidence {
     }
     if ([string]::IsNullOrWhiteSpace($ExpectedSid)) {
         $failures.Add("-ExpectedSid is required; account names and profiles are not authoritative")
+    }
+    if ([string]::IsNullOrWhiteSpace($ExpectedCommit) -or $ExpectedCommit -notmatch '^[0-9a-fA-F]{40}$') {
+        $failures.Add("-ExpectedCommit must be a full exact commit SHA")
+    }
+    if (-not $repositoryEvidence.clean_clone) {
+        $failures.Add("repository is not a readable clean clone with an origin remote and full HEAD SHA")
+    }
+    if ($repositoryEvidence.precondition_failure) {
+        $failures.Add("repository precondition failed: git reported dubious ownership; use a clean clone owned by the restricted account")
+    }
+    if (-not $repositoryEvidence.commit_matches_expected) {
+        $failures.Add("repository HEAD does not match the required full exact expected commit SHA")
+    }
+    if (-not $repositoryEvidence.owner_matches_expected) {
+        $failures.Add("repository owner does not match the expected restricted account")
+    }
+    if (-not $repositoryUnderProfile) {
+        $failures.Add("repository is not below the restricted account profile")
     }
     if (-not $profileMatchesExpectedUser) {
         $failures.Add("USERPROFILE does not identify the expected restricted user")
@@ -541,6 +645,8 @@ function New-ProbeEvidence {
         $pushProbe = Invoke-GitPushProbe -GitPath $(if ($git.present) { $git.path } else { "" }) -RepositoryPath $Repository
         if (-not $pushProbe.executed) {
             $failures.Add("git push probe could not execute")
+        } elseif ($pushProbe.precondition_failure) {
+            $failures.Add("repository precondition failed: git reported dubious ownership; use a clean clone owned by the restricted account")
         } elseif (-not $pushProbe.credential_refused) {
             $failures.Add("git push --dry-run did not refuse without credentials")
         }
@@ -571,6 +677,7 @@ function New-ProbeEvidence {
             user_profile_leaf = $profileLeaf
             user_profile_matches_expected_user = $profileMatchesExpectedUser
         }
+        repository = $repositoryEvidence
         tools = [ordered]@{
             git = $git
             executor = $executor
@@ -697,9 +804,12 @@ if ($SelfTest) {
     exit $script:SelfTestExitCode
 }
 
+if ([string]::IsNullOrWhiteSpace($ExpectedCommit) -or $ExpectedCommit -notmatch '^[0-9a-fA-F]{40}$') {
+    throw "-ExpectedCommit must be a full exact commit SHA for a real restricted-account probe"
+}
+
 $WorkingDirectory = (Resolve-Path -LiteralPath $WorkingDirectory -ErrorAction Stop).Path
 Set-Location -LiteralPath $WorkingDirectory -ErrorAction Stop
-$null = Add-ExecutableDirectoryToPath -Directory $ExecutorBinDirectory
 $evidence = New-ProbeEvidence
 $json = $evidence | ConvertTo-Json -Depth 16
 if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {

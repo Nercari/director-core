@@ -38,14 +38,33 @@ dedicated account password through an explicit interactive console
 `Read-Host -AsSecureString` prompt, constructs the fixed-user `PSCredential`,
 starts the target directly with `Start-Process -Credential`, redirects output
 through a temporary directory, redacts output, and removes that directory at
-exit. Redirected or empty input fails before launch. The password is not
-converted to plaintext or written to a file, environment variable, argument
-list, or repository artifact.
+exit. Before prompting, it bounds the complete credentialed launch command
+(resolved executable path plus arguments) at 1024 characters and directs an
+oversized launch to the tracked `-File` bootstrap. Redirected or empty input
+fails before launch. The password is not converted to plaintext or written to
+a file, environment variable, argument list, or repository artifact.
 
-The one-step wrapper resolves the local Codex CLI and supplies only its binary
-directory to the restricted child process PATH. It does not copy the calling
-account's `.codex` directory, token, or login. `director-exec` must complete
-its own interactive Codex login before the evidence can be `completed`.
+The operator-side correction is performed by the tracked
+`scripts/clean-restricted-account-probe.ps1` script. While still in the
+operator account, it verifies the expected local account SID, clones the
+requested branch and exact commit into a new path below
+`C:\Users\director-exec`, verifies the remote, commit, and clean status, and
+writes `.director\clean-clone-preflight.json`. It then scopes the target owner
+and ACL to `director-exec`, verifies the resulting owner, and launches the
+short tracked child as `director-exec` through the secure launcher.
+
+The restricted account does not clone from GitHub: the egress boundary denies
+that operation. The child derives all probe paths from the clean clone and
+resolves `git` and `codex` from the restricted account's own `PATH`; it does
+not inject the operator's executable path or login state. `director-exec`
+must complete its own interactive Codex login before the evidence can be
+`completed`.
+
+The probe records the clean-clone owner, origin remote, full `HEAD` SHA, and
+scoped repository status. Git's `dubious ownership` result is a repository
+precondition failure, not credential-refusal evidence. Static ACL and
+repository metadata checks are setup diagnostics; the child's effective SID
+and account evidence establish who ran the probe.
 
 ## Local self-test
 
@@ -60,14 +79,27 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 
 ## Operator evidence run
 
-Run the one-step operator wrapper from the repository. It reads the account SID
-locally, prepares the evidence arguments, and opens the launcher's secure
-Windows credential prompt. The password is never supplied as a command
-argument:
+Run the tracked clean-clone bootstrap from the operator checkout. It clones
+and verifies the clean commit before writing the manifest, scopes owner/ACL on
+the target, and opens the launcher's secure Windows credential prompt. The
+password is never supplied as a command argument:
 
 ```powershell
-.\scripts\run-restricted-account-probe.ps1
+$remote = (git remote get-url origin).Trim()
+$branch = (git branch --show-current).Trim()
+$expectedCommit = (git rev-parse --verify HEAD).Trim()
+$expectedSid = [string](Get-LocalUser -Name "director-exec").SID.Value
+& .\scripts\clean-restricted-account-probe.ps1 `
+  -Remote $remote `
+  -Branch $branch `
+  -ExpectedCommit $expectedCommit `
+  -ExpectedSid $expectedSid `
+  -TargetPath "C:\Users\director-exec\director-core-issue-59"
 ```
+
+The plain `scripts\run-restricted-account-probe.ps1` wrapper is useful for
+local mechanics, but a run from the operator checkout is not acceptance
+evidence: the proof checkout must be the fresh clone owned by `director-exec`.
 
 The expected success status is `completed`. Inspect the JSON itself and retain
 it as evidence. In particular, confirm `identity.user` is `director-exec`,
@@ -77,20 +109,23 @@ it as evidence. In particular, confirm `identity.user` is `director-exec`,
 `git_push_dry_run.credential_refused` is true. A failed or incomplete report is
 not promoted by editing its status.
 
-If `tools.executor.login.authenticated` is false, start the dedicated account's
-official browser login with the same wrapper. After a successful browser login,
-it automatically runs the evidence probe:
+If `tools.executor.login.authenticated` is false, complete the dedicated
+account's official browser login when the clean-clone bootstrap invokes the
+login runner. After a successful browser login, it automatically runs the
+evidence probe. Do not substitute the operator checkout or pass an executor
+path from the operator account:
 
-```powershell
-.\scripts\run-restricted-account-probe.ps1 -Login
+```text
+codex login --device-auth
 ```
 
-This opens the login flow as `director-exec`; it does not reuse the calling
-account's login or ask for a token in the command line.
+This login runs as `director-exec`; it does not reuse the calling account's
+login or ask for a token in the command line.
 
-The launcher is intentionally not a route. It is an operator-side mechanism
-for obtaining the observation that the route registry currently lacks. Do not
-change `EXEC_STRONG.runs_as` from `operator` until a real run has recorded the
+This correction produces an evidence handoff for Sol/operator review. It does
+not by itself wire the `exec-jail` or route, and it does not establish full
+issue-59 acceptance. The launcher is intentionally not a route. Do not change
+`EXEC_STRONG.runs_as` from `operator` until a real run has recorded the
 effective identity and the operator has reviewed the evidence. After that
 review, update the route declaration and rerun preflight/conformance as a
 separate change.

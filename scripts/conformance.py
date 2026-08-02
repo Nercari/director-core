@@ -30,6 +30,9 @@ BASH = shutil.which("bash")
 POWERSHELL = shutil.which("powershell.exe") or shutil.which("powershell")
 RESTRICTED_ACCOUNT_PROBE = ROOT / "scripts" / "restricted-account-probe.ps1"
 RESTRICTED_ACCOUNT_LAUNCHER = ROOT / "scripts" / "exec-as-account.ps1"
+RESTRICTED_ACCOUNT_WRAPPER = ROOT / "scripts" / "run-restricted-account-probe.ps1"
+RESTRICTED_ACCOUNT_LOGIN_RUNNER = ROOT / "scripts" / "login-and-run-restricted-probe.ps1"
+RESTRICTED_ACCOUNT_CLEAN_BOOTSTRAP = ROOT / "scripts" / "clean-restricted-account-probe.ps1"
 
 
 @dataclass
@@ -1130,6 +1133,13 @@ def scenario_restricted_account_launcher_prompt_contract() -> tuple[bool, str]:
         post_finally = source.index("\nif ($null -ne $primaryError)", finally_block)
         guard = source.index("if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected)")
         prompt = source.index("Read-Host -Prompt", guard)
+        launch_command = source.index("$resolvedLaunchCommand =")
+        launch_command_length = source.index(
+            "$resolvedLaunchCommandLength = $resolvedLaunchCommand.Length", launch_command
+        )
+        command_limit = source.index(
+            "if ($resolvedLaunchCommandLength -gt 1024)", launch_command_length
+        )
         temp_marker_false = source.index("$temporaryCreated = $false")
         candidate_guard = source.index("if (Test-Path -LiteralPath $temporary)", temp_marker_false)
         temp_create = source.index(
@@ -1171,6 +1181,15 @@ def scenario_restricted_account_launcher_prompt_contract() -> tuple[bool, str]:
         < finally_block
     ):
         return False, "prompt and temporary directory creation are not inside the protected scope"
+    if "if ($ArgumentList.Length -gt 1024)" in source:
+        return False, "launcher still limits ArgumentList without the resolved executable path"
+    if not (launch_command < launch_command_length < command_limit < prompt):
+        return False, "complete credentialed launch command is not bounded before Read-Host"
+    launch_guard_source = source[launch_command:prompt]
+    if "$resolvedFilePath" not in launch_guard_source or "$ArgumentList" not in launch_guard_source:
+        return False, "launch command guard does not include both executable path and argument list"
+    if "maximum 1024" not in launch_guard_source or "tracked -File bootstrap" not in launch_guard_source:
+        return False, "complete launch-command rejection lacks a bounded diagnostic and tracked -File remediation"
     if not (launch < credential_clear and launch < parameters_clear):
         return False, "credential references are not cleared after launch"
     cleanup_source = source[finally_block:post_finally]
@@ -1198,7 +1217,107 @@ def scenario_restricted_account_launcher_prompt_contract() -> tuple[bool, str]:
     finally:
         if candidate.exists():
             shutil.rmtree(candidate)
-    return True, "#59 launcher has ordered protected prompt/temp setup and non-masking cleanup"
+    return True, "#59 launcher bounds the complete credentialed command before prompt and preserves protected cleanup"
+
+
+def scenario_restricted_account_continuation_contract() -> tuple[bool, str]:
+    """Guard the short clean-clone continuation and proof-path invariants."""
+    paths = (
+        RESTRICTED_ACCOUNT_WRAPPER,
+        RESTRICTED_ACCOUNT_LOGIN_RUNNER,
+        RESTRICTED_ACCOUNT_PROBE,
+        RESTRICTED_ACCOUNT_CLEAN_BOOTSTRAP,
+    )
+    if any(not path.is_file() for path in paths):
+        return False, "required #59 continuation script is missing"
+    try:
+        wrapper = RESTRICTED_ACCOUNT_WRAPPER.read_text(encoding="utf-8")
+        login = RESTRICTED_ACCOUNT_LOGIN_RUNNER.read_text(encoding="utf-8")
+        probe = RESTRICTED_ACCOUNT_PROBE.read_text(encoding="utf-8")
+        bootstrap = RESTRICTED_ACCOUNT_CLEAN_BOOTSTRAP.read_text(encoding="utf-8")
+    except OSError as error:
+        return False, f"#59 continuation source could not be read: {error}"
+
+    if "EncodedCommand" in wrapper or "-EncodedCommand" in wrapper:
+        return False, "run-restricted-account-probe still embeds an encoded payload"
+    required_wrapper = (
+        "-File `\"$childScriptPath`\"",
+        "-RestrictedLoginChild",
+        "director-core-issue-59",
+        "Get-ResolvedCommit",
+        "ExpectedCommit",
+        "^[0-9a-fA-F]{40}$",
+    )
+    missing = [marker for marker in required_wrapper if marker not in wrapper]
+    if missing:
+        return False, "clean-clone bootstrap contract is incomplete: " + ", ".join(missing)
+    if "-ExecutorPath" in wrapper or "-ExecutorBinDirectory" in wrapper:
+        return False, "wrapper still injects an operator executor path"
+
+    required_login = (
+        'Get-Command -Name "git"',
+        'Get-Command -Name "codex"',
+        "restricted account's own PATH",
+    )
+    missing = [marker for marker in required_login if marker not in login]
+    if missing:
+        return False, "restricted login PATH resolution contract is incomplete: " + ", ".join(missing)
+    if "ExecutorPath" in login or "ExecutorBinDirectory" in login:
+        return False, "login runner accepts operator executable injection"
+
+    required_bootstrap = (
+        'Get-Command -Name $Name',
+        "clone --branch $Branch --single-branch",
+        "$git.Source clone --branch $Branch --single-branch $Remote $target",
+        "$target.StartsWith($profileRoot + \"\\\", [StringComparison]::OrdinalIgnoreCase)",
+        "ExpectedCommit",
+        "ExpectedSid",
+        "status --porcelain --untracked-files=all",
+        "owner_before_scope",
+        "Invoke-Icacls -Arguments @($target, \"/setowner\", $UserName, \"/T\", \"/C\")",
+        "Invoke-Icacls -Arguments @($target, \"/grant\", \"${UserName}:(OI)(CI)M\", \"/T\", \"/C\")",
+        "ownerAfterScope",
+        "clean-clone-preflight.json",
+        "login-and-run-restricted-probe.ps1",
+    )
+    missing = [marker for marker in required_bootstrap if marker not in bootstrap]
+    if missing:
+        return False, "clean-clone bootstrap contract is incomplete: " + ", ".join(missing)
+    if (
+        "--untracked-files=no" in bootstrap
+        or "EncodedCommand" in bootstrap
+        or "ExecutorPath" in bootstrap
+        or "ExecutorBinDirectory" in bootstrap
+        or "safe.directory=" in bootstrap
+    ):
+        return False, "clean-clone bootstrap injects an operator path or safe.directory"
+
+    forbidden_probe = ("safe.directory=", "Add-ExecutableDirectoryToPath", "ExecutorBinDirectory")
+    found = [marker for marker in forbidden_probe if marker in probe]
+    if found:
+        return False, "restricted proof path retains forbidden injection: " + ", ".join(found)
+    required_probe = (
+        "Get-RepositoryEvidence",
+        "path = $RepositoryPath",
+        "owner = $owner",
+        "owner_error = $ownerError",
+        "remote = ([string]$remote.output).Trim()",
+        "remote_exit_code",
+        "commit_sha = $commitSha",
+        "commit_exit_code",
+        "expected_commit = $ExpectedCommit",
+        "status_exit_code",
+        "status_clean",
+        "precondition_failure",
+        "dubious ownership",
+        "artifact_removed",
+        "owner_matches_expected",
+        "status_scope",
+    )
+    missing = [marker for marker in required_probe if marker not in probe]
+    if missing:
+        return False, "restricted evidence contract is incomplete: " + ", ".join(missing)
+    return True, "#59 continuation uses a short tracked bootstrap and identity-safe proof paths"
 
 
 def report(number: int, passed: Optional[bool], reason: str) -> bool:
@@ -1249,6 +1368,7 @@ def main() -> int:
         scenario_removed_route_is_not_authorised(),
         scenario_restricted_account_probe_self_test(),
         scenario_restricted_account_launcher_prompt_contract(),
+        scenario_restricted_account_continuation_contract(),
     )
     all_passed = True
     for index, (passed, reason) in enumerate(outcomes, 1):
