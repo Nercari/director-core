@@ -40,6 +40,7 @@ EXECUTOR_EVIDENCE_SCHEMA = ROOT / "schemas" / "executor-evidence.schema.json"
 CROSS_REVIEW_VALIDATOR = ROOT / "scripts" / "validate-cross-review.sh"
 CROSS_REVIEW_EXAMPLES = ROOT / "examples" / "cross-review"
 CROSS_REVIEW_SCHEMA = ROOT / "schemas" / "cross-review.schema.json"
+BRANCH_STATE = ROOT / "scripts" / "branch-state.sh"
 SANITIZER_NEGATIVE_TEMPLATE = (
     ROOT / "tests" / "sanitizer" / "executor-evidence" / "leak-case.generated.invalid.yaml.tmpl"
 )
@@ -1449,6 +1450,349 @@ def scenario_restricted_account_continuation_contract() -> tuple[bool, str]:
     return True, "#59 continuation uses a short tracked bootstrap and identity-safe proof paths"
 
 
+def build_branch_state_repository(root: Path, head_files: dict, main_files: dict) -> None:
+    """A synthetic repository shaped like a squash merge.
+
+    One base commit, a head branch that changes files, then a main commit that
+    reaches the given content **without** the head's commit in its ancestry —
+    which is exactly what a squash merge, a rebase, or a superseding merge
+    leaves behind, and exactly the shape a three-dot diff misreads. No network,
+    no GitHub, no pull request: the defect is reproducible from git alone.
+    """
+    checked(["git", "init", "--initial-branch=main", str(root)])
+    checked(["git", "-C", str(root), "config", "user.email", "conformance@example.invalid"])
+    checked(["git", "-C", str(root), "config", "user.name", "Conformance fixture"])
+    write_text(root / "base.txt", "base\n")
+    write_text(root / "file.txt", "line1\n")
+    write_text(root / "doomed.txt", "doomed\n")
+    checked(["git", "-C", str(root), "add", "."])
+    checked(["git", "-C", str(root), "commit", "-m", "base"])
+
+    checked(["git", "-C", str(root), "checkout", "-b", "pr-head"])
+    apply_files(root, head_files)
+    checked(["git", "-C", str(root), "commit", "-m", "head work"])
+
+    checked(["git", "-C", str(root), "checkout", "main"])
+    apply_files(root, main_files)
+    # --allow-empty: a case may leave main untouched on purpose (the unresolvable
+    # ref case never reaches path comparison), and that is a fixture, not a bug.
+    checked(["git", "-C", str(root), "commit", "--allow-empty", "-m", "squashed onto main"])
+
+
+def apply_files(root: Path, files: dict) -> None:
+    for name, content in files.items():
+        target = root / name
+        if content is None:
+            if target.exists():
+                target.unlink()
+            checked(["git", "-C", str(root), "rm", "-q", "--cached", name])
+        elif isinstance(content, bytes):
+            target.write_bytes(content)
+            checked(["git", "-C", str(root), "add", name])
+        else:
+            write_text(target, content)
+            checked(["git", "-C", str(root), "add", name])
+
+
+def run_branch_state(root: Path, *arguments: str) -> Command:
+    if BASH is None:
+        raise RuntimeError("bash is required to execute scripts/branch-state.sh")
+    return run([BASH, str(BRANCH_STATE), "--repo", str(root), *arguments], ROOT)
+
+
+def branch_state_case(
+    head_files: dict,
+    main_files: dict,
+    expected_status: str,
+    expected_returncode: int,
+    expected_paths: Iterable[str] = (),
+    arguments: Iterable[str] = (),
+) -> tuple[bool, str]:
+    """Build one synthetic case, run the classifier, assert status and table."""
+    if not BRANCH_STATE.is_file():
+        return False, f"missing classifier: {BRANCH_STATE}"
+    try:
+        with tempfile.TemporaryDirectory(prefix="director-branch-state-") as temporary:
+            root = Path(temporary) / "fixture-repository"
+            root.mkdir(parents=True)
+            build_branch_state_repository(root, head_files, main_files)
+            result = run_branch_state(root, "--base", "main", "--head", "pr-head", *arguments)
+    except Exception as error:
+        return False, f"case could not be built or exercised: {error}"
+    if f"Status: {expected_status}" not in result.output:
+        return False, f"expected status {expected_status}: {result.output.strip()}"
+    if result.returncode != expected_returncode:
+        return (
+            False,
+            f"expected exit {expected_returncode}, got {result.returncode}: {result.output.strip()}",
+        )
+    # Column padding is presentation, so the assertions compare on collapsed
+    # whitespace. A test that fails when a column widens teaches people to edit
+    # the test rather than read it.
+    collapsed = " ".join(result.output.split())
+    for expected in expected_paths:
+        if " ".join(expected.split()) not in collapsed:
+            return False, f"report omitted {expected!r}: {result.output.strip()}"
+    return True, f"{expected_status} (exit {expected_returncode})"
+
+
+def scenario_branch_state_squash_landed_exact() -> tuple[bool, str]:
+    """The defect itself: identical content, non-empty three-dot, not blocked."""
+    outcome, reason = branch_state_case(
+        head_files={"file.txt": "line1\nline2\n"},
+        main_files={"file.txt": "line1\nline2\n"},
+        expected_status="SUPERSEDED",
+        expected_returncode=0,
+        expected_paths=["landed_exact   file.txt"],
+    )
+    return outcome, f"squash-merged content classified landed_exact: {reason}"
+
+
+def scenario_branch_state_main_superset() -> tuple[bool, str]:
+    outcome, reason = branch_state_case(
+        head_files={"file.txt": "line1\nline2\n"},
+        main_files={"file.txt": "line1\nline2\nline3\n"},
+        expected_status="SUPERSEDED",
+        expected_returncode=0,
+        expected_paths=["main_superset  file.txt"],
+    )
+    return outcome, f"base carrying a strict superset does not block: {reason}"
+
+
+def scenario_branch_state_not_landed_blocks() -> tuple[bool, str]:
+    outcome, reason = branch_state_case(
+        head_files={"file.txt": "line1\nline2\n"},
+        main_files={"base.txt": "base\nunrelated\n"},
+        expected_status="BLOCKED_BRANCH_STATE",
+        expected_returncode=1,
+        expected_paths=["not_landed"],
+    )
+    return outcome, f"genuinely unlanded content still blocks: {reason}"
+
+
+def scenario_branch_state_deleted_landed() -> tuple[bool, str]:
+    outcome, reason = branch_state_case(
+        head_files={"doomed.txt": None},
+        main_files={"doomed.txt": None},
+        expected_status="SUPERSEDED",
+        expected_returncode=0,
+        expected_paths=["deleted_landed doomed.txt"],
+    )
+    return outcome, f"a deletion present on both sides is landed: {reason}"
+
+
+def scenario_branch_state_unknown_unresolvable_ref() -> tuple[bool, str]:
+    """A ref that was never fetched is unknown, never 'the content is absent'."""
+    if not BRANCH_STATE.is_file():
+        return False, f"missing classifier: {BRANCH_STATE}"
+    try:
+        with tempfile.TemporaryDirectory(prefix="director-branch-state-") as temporary:
+            root = Path(temporary) / "fixture-repository"
+            root.mkdir(parents=True)
+            build_branch_state_repository(root, {"file.txt": "line1\nline2\n"}, {})
+            result = run_branch_state(
+                root, "--base", "main", "--head", "refs/remotes/pr/9999"
+            )
+    except Exception as error:
+        return False, f"case could not be built or exercised: {error}"
+    if "Status: UNKNOWN_BRANCH_SUPERSESSION" not in result.output or result.returncode != 2:
+        return False, f"expected UNKNOWN_BRANCH_SUPERSESSION with exit 2: {result.output.strip()}"
+    if "BLOCKED_BRANCH_STATE" in result.output:
+        return False, "an unfetched ref was reported as blocked rather than unknown"
+    return True, "an unresolvable head ref is unknown, not blocked (exit 2)"
+
+
+def scenario_branch_state_unknown_binary() -> tuple[bool, str]:
+    outcome, reason = branch_state_case(
+        head_files={"blob.bin": b"\x00\x01head\x00"},
+        main_files={"blob.bin": b"\x00\x01main\x00"},
+        expected_status="UNKNOWN_BRANCH_SUPERSESSION",
+        expected_returncode=2,
+        expected_paths=["unknown", "binary difference"],
+    )
+    return outcome, f"a binary difference is unknown, not guessed at: {reason}"
+
+
+def scenario_branch_state_mixed_blocks_and_reports_both() -> tuple[bool, str]:
+    outcome, reason = branch_state_case(
+        head_files={"file.txt": "line1\nline2\n", "other.txt": "head only\n"},
+        main_files={"file.txt": "line1\nline2\n"},
+        expected_status="BLOCKED_BRANCH_STATE",
+        expected_returncode=1,
+        expected_paths=["landed_exact   file.txt", "not_landed", "other.txt"],
+    )
+    return outcome, f"a mixed set blocks and reports every path: {reason}"
+
+
+def scenario_branch_state_three_dot_is_demoted() -> tuple[bool, str]:
+    """Both signals are reported, and the content-level one decides."""
+    if not BRANCH_STATE.is_file():
+        return False, f"missing classifier: {BRANCH_STATE}"
+    try:
+        with tempfile.TemporaryDirectory(prefix="director-branch-state-") as temporary:
+            root = Path(temporary) / "fixture-repository"
+            root.mkdir(parents=True)
+            build_branch_state_repository(
+                root, {"file.txt": "line1\nline2\n"}, {"file.txt": "line1\nline2\n"}
+            )
+            legacy = run(
+                ["git", "-C", str(root), "diff", "--name-only", "main...pr-head"], ROOT
+            )
+            result = run_branch_state(root, "--base", "main", "--head", "pr-head")
+    except Exception as error:
+        return False, f"case could not be built or exercised: {error}"
+    if "file.txt" not in legacy.output:
+        return False, "the legacy three-dot proxy did not reproduce the misleading signal"
+    if "Three-dot proxy result: NON-EMPTY" not in result.output:
+        return False, f"the three-dot signal was not reported: {result.output.strip()}"
+    if "Status: SUPERSEDED" not in result.output or result.returncode != 0:
+        return False, f"the three-dot signal still drove the status: {result.output.strip()}"
+    return True, "three-dot reported NON-EMPTY, status still SUPERSEDED from content"
+
+
+def scenario_branch_state_closed_pr_does_not_block() -> tuple[bool, str]:
+    outcome, reason = branch_state_case(
+        head_files={"file.txt": "line1\nline2\n"},
+        main_files={"base.txt": "base\nunrelated\n"},
+        expected_status="CONTEXT_ONLY_PR_NOT_OPEN",
+        expected_returncode=0,
+        expected_paths=["not_landed"],
+        arguments=["--pr-state", "merged"],
+    )
+    return outcome, f"a merged pull request reports content as context only: {reason}"
+
+
+def scenario_branch_state_unusable_environment_is_named() -> tuple[bool, str]:
+    """A missing prerequisite must be said, not died on halfway through a report.
+
+    The classifier needs mktemp. Without the guard it exited 127 with a bare
+    shell error after printing a partial table, which a caller reading exit
+    codes could not distinguish from a classification.
+    """
+    if BRANCH_STATE.is_file() is False:
+        return False, f"missing classifier: {BRANCH_STATE}"
+    try:
+        with tempfile.TemporaryDirectory(prefix="director-branch-state-") as temporary:
+            root = Path(temporary) / "fixture-repository"
+            root.mkdir(parents=True)
+            build_branch_state_repository(
+                root, {"file.txt": "line1\nline2\n"}, {"file.txt": "line1\nline2\n"}
+            )
+            # A failing mktemp rather than a stripped PATH: the point is the
+            # prerequisite, and rebuilding a minimal PATH would test the fixture.
+            shim = Path(temporary) / "bin"
+            shim.mkdir()
+            write_text(shim / "mktemp", "#!/usr/bin/env bash\nexit 1\n")
+            (shim / "mktemp").chmod(0o755)
+            env = os.environ.copy()
+            env["PATH"] = f"{shim}{os.pathsep}{env['PATH']}"
+            completed = subprocess.run(
+                [BASH, str(BRANCH_STATE), "--repo", str(root), "--base", "main",
+                 "--head", "pr-head"],
+                cwd=str(ROOT),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=45,
+                check=False,
+                env=env,
+            )
+    except Exception as error:
+        return False, f"case could not be built or exercised: {error}"
+    if completed.returncode != 3:
+        return False, f"expected exit 3, got {completed.returncode}: {completed.stdout.strip()}"
+    if "UNUSABLE_ENVIRONMENT" not in completed.stdout or "mktemp" not in completed.stdout:
+        return False, f"the missing prerequisite was not named: {completed.stdout.strip()}"
+    return True, "an unavailable mktemp is named and exits 3, not a partial report"
+
+
+def run_preflight_supersession(head_files: dict, main_files: dict, head: str) -> Command:
+    """Drive scripts/preflight.sh over a synthetic superseded repository."""
+    if BASH is None:
+        raise RuntimeError("bash is required to exercise scripts/preflight.sh")
+    with tempfile.TemporaryDirectory(prefix="director-preflight-supersession-") as temporary:
+        temp = Path(temporary)
+        root = temp / "fixture-repository"
+        scripts = root / "scripts"
+        fake_bin = temp / "bin"
+        scripts.mkdir(parents=True)
+        fake_bin.mkdir()
+        build_branch_state_repository(root, head_files, main_files)
+        shutil.copy2(PREFLIGHT_SOURCE, scripts / "preflight.sh")
+        shutil.copy2(BRANCH_STATE, scripts / "branch-state.sh")
+        # A usable executor route, so the only thing that can turn this fixture
+        # RED is the branch-state section under test.
+        write_text(root / ".director" / "routes.yaml", preflight_fixture_routes(
+            "    model: primary-fixture\n"
+            "    runs_as: operator\n"
+            "    invoke: scripts/exec-jail.sh primary-fixture\n"
+            "    quarantined: false\n"
+            "    jail_verified: true\n"
+            "    last_verified: 2026-07-26\n"
+        ))
+        write_text(fake_bin / "codex", "#!/usr/bin/env bash\necho 'Logged in using ChatGPT'\n")
+        write_text(fake_bin / "claude", "#!/usr/bin/env bash\nexit 0\n")
+        write_text(fake_bin / "agy", "#!/usr/bin/env bash\nexit 0\n")
+        write_text(
+            fake_bin / "gh",
+            "#!/usr/bin/env bash\nif [ \"$1\" = auth ]; then exit 0; fi\n"
+            "if [ \"$1\" = api ]; then echo 'X-Oauth-Scopes: repo, workflow'; exit 0; fi\nexit 1\n",
+        )
+        for executable in fake_bin.iterdir():
+            executable.chmod(0o755)
+        env = os.environ.copy()
+        env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+        env["PREFLIGHT_SUPERSESSION_BASE"] = "main"
+        env["PREFLIGHT_SUPERSESSION_HEAD"] = head
+        completed = subprocess.run(
+            [BASH, str(scripts / "preflight.sh")],
+            cwd=str(root),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=45,
+            check=False,
+            env=env,
+        )
+        return Command(completed.returncode, completed.stdout)
+
+
+def scenario_preflight_does_not_block_superseded_content() -> tuple[bool, str]:
+    """The gate itself: a squash-merged head must not turn preflight RED."""
+    if not BRANCH_STATE.is_file():
+        return False, f"missing classifier: {BRANCH_STATE}"
+    try:
+        result = run_preflight_supersession(
+            {"file.txt": "line1\nline2\n"}, {"file.txt": "line1\nline2\n"}, "pr-head"
+        )
+    except Exception as error:
+        return False, f"preflight could not be exercised: {error}"
+    if "BLOCKED_BRANCH_STATE" in result.output:
+        return False, f"preflight blocked on superseded content: {result.output.strip()}"
+    if "Status: SUPERSEDED" not in result.output:
+        return False, f"preflight did not report the content-level status: {result.output.strip()}"
+    if result.returncode != 0:
+        return False, f"preflight exited {result.returncode}, expected 0: {result.output.strip()}"
+    return True, "preflight stays GREEN when the head's content is already on the base"
+
+
+def scenario_preflight_still_blocks_unlanded_content() -> tuple[bool, str]:
+    """And the gate still refuses what genuinely has not landed."""
+    if not BRANCH_STATE.is_file():
+        return False, f"missing classifier: {BRANCH_STATE}"
+    try:
+        result = run_preflight_supersession(
+            {"file.txt": "line1\nline2\n"}, {"base.txt": "base\nunrelated\n"}, "pr-head"
+        )
+    except Exception as error:
+        return False, f"preflight could not be exercised: {error}"
+    if "BLOCKED_BRANCH_STATE" not in result.output:
+        return False, f"preflight did not block unlanded content: {result.output.strip()}"
+    if result.returncode == 0:
+        return False, f"preflight exited 0 on unlanded content: {result.output.strip()}"
+    return True, "preflight is still RED when a claimed path has not landed"
+
+
 def run_executor_evidence_validator(document: Path) -> Command:
     """Run the executor-evidence validator over one document.
 
@@ -1843,6 +2187,18 @@ def main() -> int:
         scenario_cross_review_reference_format_matches_executor_evidence(),
         scenario_cross_review_does_not_dereference_subject(),
         scenario_cross_review_examples_are_sanitized(),
+        scenario_branch_state_squash_landed_exact(),
+        scenario_branch_state_main_superset(),
+        scenario_branch_state_not_landed_blocks(),
+        scenario_branch_state_deleted_landed(),
+        scenario_branch_state_unknown_unresolvable_ref(),
+        scenario_branch_state_unknown_binary(),
+        scenario_branch_state_mixed_blocks_and_reports_both(),
+        scenario_branch_state_three_dot_is_demoted(),
+        scenario_branch_state_closed_pr_does_not_block(),
+        scenario_branch_state_unusable_environment_is_named(),
+        scenario_preflight_does_not_block_superseded_content(),
+        scenario_preflight_still_blocks_unlanded_content(),
         scenario_example_sanitizer_accepts_public_examples(),
         scenario_example_sanitizer_rejects_generated_leak(),
     )
