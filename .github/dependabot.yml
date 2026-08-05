@@ -1,0 +1,15 @@
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:37"
+      timezone: "America/Fortaleza"
+    open-pull-requests-limit: 3
+    groups:
+      actions-runtime:
+        patterns:
+          - "*"
