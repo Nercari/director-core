@@ -1,0 +1,271 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Nercari/director-core/schemas/cross-review.schema.json",
+  "title": "Cross-review ledger",
+  "description": "Provider-neutral record of who mutated, who reviewed, whether the review was read-only, and whether it can count as independent Layer 2 under current policy. A record, not an independence guarantee: it can reject a false independence claim and a false completion claim, and it grants no authority to commit, push, open a pull request, merge, deploy, or promote anything.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["cross_review"],
+  "properties": {
+    "cross_review": { "$ref": "#/$defs/ledger" }
+  },
+  "$defs": {
+    "non_empty_string": {
+      "type": "string",
+      "minLength": 1
+    },
+    "evidence_reference": {
+      "description": "A structured pointer to retained evidence. The pattern is deliberately identical to schemas/executor-evidence.schema.json#/$defs/evidence_reference — one reference format across contracts, asserted by a conformance scenario so the two cannot drift. A reference is validated as a string and never dereferenced: no validator fetches, opens, executes, replays, or proves the existence of what it points at.",
+      "type": "string",
+      "pattern": "^(artifact|file|commit|run):[A-Za-z0-9._/-]+$"
+    },
+    "optional_evidence_reference": {
+      "description": "An evidence reference, or null where the thing referenced honestly does not exist yet.",
+      "oneOf": [
+        { "$ref": "#/$defs/evidence_reference" },
+        { "type": "null" }
+      ]
+    },
+    "tool": {
+      "description": "Public tool identity. Never a private model name or a private route name. 'other' means unrecorded or unrecognised, which is not the same as distinct.",
+      "enum": ["codex", "claude", "antigravity", "human", "other"]
+    },
+    "provider": {
+      "description": "Public provider identity. Never a private model name. 'other' means unrecorded or unrecognised, which is not the same as distinct.",
+      "enum": ["openai", "anthropic", "google", "human", "other"]
+    },
+    "role": {
+      "description": "What the review was for. String enum. Never a boolean.",
+      "enum": [
+        "scope",
+        "test_adequacy",
+        "adversarial",
+        "identity_independence",
+        "behavior",
+        "other"
+      ]
+    },
+    "verdict": {
+      "description": "String enum. Never a boolean.",
+      "enum": ["pass", "fail", "blocked"]
+    },
+    "severity": {
+      "description": "String enum. Never a boolean. A blocker blocks the whole record; there is no resolution field, because no resolution machinery exists in this version.",
+      "enum": ["info", "warning", "blocker"]
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["finding_id", "severity", "summary", "evidence_ref"],
+      "properties": {
+        "finding_id": { "$ref": "#/$defs/non_empty_string" },
+        "severity": { "$ref": "#/$defs/severity" },
+        "summary": { "$ref": "#/$defs/non_empty_string" },
+        "evidence_ref": { "$ref": "#/$defs/evidence_reference" }
+      }
+    },
+    "identity": {
+      "description": "Who ran. Adapter is optional context and is never an identity by itself.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tool", "provider", "invocation_id"],
+      "properties": {
+        "tool": { "$ref": "#/$defs/tool" },
+        "adapter": { "$ref": "#/$defs/non_empty_string" },
+        "provider": { "$ref": "#/$defs/provider" },
+        "invocation_id": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+    "review": {
+      "description": "One recorded review. The three same_*_as_executor booleans are redundant against the recorded identities on purpose: they are attestations, and the validator recomputes them and rejects contradictions. A contradiction is evidence of a bad record, not something to reconcile silently — which is why they must not later be 'simplified' away.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "review_id",
+        "role",
+        "reviewer",
+        "read_only",
+        "mutation_authority",
+        "changed_files",
+        "self_review_declared",
+        "same_tool_as_executor",
+        "same_provider_as_executor",
+        "same_invocation_as_executor",
+        "verdict",
+        "findings"
+      ],
+      "properties": {
+        "review_id": { "$ref": "#/$defs/non_empty_string" },
+        "role": { "$ref": "#/$defs/role" },
+        "reviewer": { "$ref": "#/$defs/identity" },
+        "read_only": { "type": "boolean" },
+        "mutation_authority": { "type": "boolean" },
+        "changed_files": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/non_empty_string" }
+        },
+        "self_review_declared": { "type": "boolean" },
+        "same_tool_as_executor": { "type": "boolean" },
+        "same_provider_as_executor": { "type": "boolean" },
+        "same_invocation_as_executor": { "type": "boolean" },
+        "verdict": { "$ref": "#/$defs/verdict" },
+        "findings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/finding" }
+        }
+      }
+    },
+    "ledger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "work_unit_id",
+        "subject",
+        "executor",
+        "adapter_internal_verification",
+        "reviews",
+        "layer2",
+        "behavior_check",
+        "promotion"
+      ],
+      "properties": {
+        "schema_version": { "$ref": "#/$defs/non_empty_string" },
+        "work_unit_id": { "$ref": "#/$defs/non_empty_string" },
+        "subject": {
+          "description": "What was reviewed, by reference. Every field here is a validated reference string only; the ledger records that a claim was made, never that the referenced artifact exists.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "packet_ref",
+            "result_ref",
+            "executor_evidence_ref",
+            "diff_ref",
+            "repo_status_ref"
+          ],
+          "properties": {
+            "packet_ref": { "$ref": "#/$defs/evidence_reference" },
+            "result_ref": { "$ref": "#/$defs/evidence_reference" },
+            "executor_evidence_ref": { "$ref": "#/$defs/evidence_reference" },
+            "diff_ref": { "$ref": "#/$defs/evidence_reference" },
+            "repo_status_ref": { "$ref": "#/$defs/evidence_reference" }
+          }
+        },
+        "executor": {
+          "description": "The one mutator for this unit.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tool",
+            "provider",
+            "invocation_id",
+            "mutation_authority",
+            "changed_files"
+          ],
+          "properties": {
+            "tool": { "$ref": "#/$defs/tool" },
+            "adapter": { "$ref": "#/$defs/non_empty_string" },
+            "provider": { "$ref": "#/$defs/provider" },
+            "invocation_id": { "$ref": "#/$defs/non_empty_string" },
+            "mutation_authority": { "type": "boolean" },
+            "changed_files": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/non_empty_string" }
+            }
+          }
+        },
+        "adapter_internal_verification": {
+          "description": "Verification an adapter ran on its own work. Useful evidence; never independent Layer 2. Represented explicitly even when absent, so 'no adapter check ran' and 'nobody recorded whether one ran' are different records.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["present", "verifier", "counts_as_independent_layer2", "evidence_ref"],
+          "properties": {
+            "present": { "type": "boolean" },
+            "verifier": {
+              "oneOf": [
+                { "$ref": "#/$defs/non_empty_string" },
+                { "type": "null" }
+              ]
+            },
+            "counts_as_independent_layer2": {
+              "description": "Always false. Adapter-local verification of adapter-local work is not an independent review.",
+              "type": "boolean"
+            },
+            "evidence_ref": { "$ref": "#/$defs/optional_evidence_reference" }
+          }
+        },
+        "reviews": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/review" }
+        },
+        "layer2": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "independent_review_satisfied",
+            "independent_review_id",
+            "auxiliary_review_ids",
+            "auto_promotion_allowed_by_this_record",
+            "reason"
+          ],
+          "properties": {
+            "independent_review_satisfied": { "type": "boolean" },
+            "independent_review_id": {
+              "description": "Required key. Names the single review claimed as independent, or null. Multiple auxiliary reviews never aggregate into an independent one.",
+              "oneOf": [
+                { "$ref": "#/$defs/non_empty_string" },
+                { "type": "null" }
+              ]
+            },
+            "auxiliary_review_ids": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/non_empty_string" }
+            },
+            "auto_promotion_allowed_by_this_record": {
+              "description": "Always false. This ledger never arms auto-merge.",
+              "type": "boolean"
+            },
+            "reason": { "$ref": "#/$defs/non_empty_string" }
+          }
+        },
+        "behavior_check": {
+          "description": "The human behavior check stays outside this ledger. A missing one is recorded honestly, never as completion.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["required", "completed", "evidence_ref"],
+          "properties": {
+            "required": { "type": "boolean" },
+            "completed": { "type": "boolean" },
+            "evidence_ref": { "$ref": "#/$defs/optional_evidence_reference" }
+          }
+        },
+        "promotion": {
+          "description": "What this record says about promotion, which is only ever 'blocked' or 'not blocked by me'. Never 'authorized'.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "blocked_by_this_record",
+            "authorized_by_this_record",
+            "blocking_review_ids",
+            "reason"
+          ],
+          "properties": {
+            "blocked_by_this_record": {
+              "description": "false means only that this ledger recorded no promotion-blocking review finding. It never means promotion is authorized.",
+              "type": "boolean"
+            },
+            "authorized_by_this_record": {
+              "description": "Always false. Review evidence may add reasons to reject; it may never be the reason to merge.",
+              "type": "boolean"
+            },
+            "blocking_review_ids": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/non_empty_string" }
+            },
+            "reason": { "$ref": "#/$defs/non_empty_string" }
+          }
+        }
+      }
+    }
+  }
+}
