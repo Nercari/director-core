@@ -1,14 +1,17 @@
 name: gate
-
 # pull_request, never pull_request_target. On a public repo pull_request runs
 # fork code with a read-only token and no secrets; pull_request_target runs with
 # full secrets and write access, and is the documented path by which public
 # repositories get compromised.
-on: pull_request
+on:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"
+      timezone: "America/Fortaleza"
 
 permissions:
   contents: read          # least privilege, stated rather than inherited
-
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -19,7 +22,6 @@ jobs:
 
       - name: CLAUDE.md is exactly one line
         run: test "$(wc -l < CLAUDE.md)" -le 1
-
       - name: No Director term defined outside AGENTS.md
         run: |
           # grep exits 1 when it finds nothing, which would fail the step on
@@ -29,7 +31,6 @@ jobs:
                  | grep -v "^\./AGENTS\.md$" \
                  | grep -v "^\./docs/blueprint\.md$" || true)
           if [ -n "$hits" ]; then echo "Director terms in: $hits"; exit 1; fi
-
       - name: No model name outside routes.yaml
         run: |
           # *.yaml as well as *.yml — routes.yaml is a .yaml file, so without it
@@ -40,7 +41,6 @@ jobs:
                  | grep -v "^\./\.director/routes\.yaml$" \
                  | grep -v "^\./\.github/workflows/gate\.yml$" || true)
           if [ -n "$hits" ]; then echo "Model names outside routes.yaml: $hits"; exit 1; fi
-
       - name: shellcheck
         # find, not a glob: scripts/*.sh does not recurse, so scripts/telemetry/
         # shipped two units completely unlinted. -print0/-0 survives spaces.
@@ -53,7 +53,6 @@ jobs:
 
       - name: conformance
         run: sh scripts/conformance.sh
-
       - name: telemetry selfchecks
         run: |
           set -e
@@ -65,7 +64,6 @@ jobs:
         run: |
           chmod +x .claude/hooks/*.sh
           bash .claude/hooks/selftest.sh
-
       # This runner HAS check-jsonschema installed by the schemas step above, so
       # the selftest above can only ever exercise the validator-present path. The
       # fail-open being fixed lived entirely in the other branch. This demo stubs
@@ -73,7 +71,6 @@ jobs:
       # not only on an operator machine that happens to lack the tool.
       - name: handoff validation degrades rather than stops checking
         run: bash .claude/hooks/handoff-degradation-demo.sh
-
       # Reaches no external network: every allowed target in the check is a local
       # socket, so the result is the same on a runner with no egress as on one
       # with it. It proves the proxy's allow list, and only that. The boundary —
