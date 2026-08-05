@@ -9,6 +9,7 @@ root while preserving the production validator logic under test.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -40,6 +41,9 @@ EXECUTOR_EVIDENCE_SCHEMA = ROOT / "schemas" / "executor-evidence.schema.json"
 CROSS_REVIEW_VALIDATOR = ROOT / "scripts" / "validate-cross-review.sh"
 CROSS_REVIEW_EXAMPLES = ROOT / "examples" / "cross-review"
 CROSS_REVIEW_SCHEMA = ROOT / "schemas" / "cross-review.schema.json"
+EVIDENCE_BUNDLE_VALIDATOR = ROOT / "scripts" / "validate-evidence-bundle.sh"
+EVIDENCE_BUNDLE_EXAMPLES = ROOT / "examples" / "evidence-bundle"
+EVIDENCE_BUNDLE_SCHEMA = ROOT / "schemas" / "evidence-bundle.schema.json"
 BRANCH_STATE = ROOT / "scripts" / "branch-state.sh"
 SANITIZER_NEGATIVE_TEMPLATE = (
     ROOT / "tests" / "sanitizer" / "executor-evidence" / "leak-case.generated.invalid.yaml.tmpl"
@@ -155,6 +159,52 @@ CROSS_REVIEW_REJECT_CASES = (
         "requires independent_review_id to be null",
     ),
     ("reviewer-identity-missing", "missing required field 'provider'"),
+)
+
+# The evidence-bundle fixture set is canonical in the same way as the two above:
+# every manifest is registered here by name. Manifests sit at the top level of
+# examples/evidence-bundle/ and share one artifacts/ subdirectory, because a
+# bundle directory is whatever directory the manifest sits in — giving each
+# manifest its own copy of four artifacts would multiply the fixture data
+# without testing anything the shared tree does not already test.
+EVIDENCE_BUNDLE_VALID_CASES = (
+    "minimal-fulfilled",
+    "blocked-review",
+    "missing-behavior-check",
+    "extra-artifact",
+)
+
+EVIDENCE_BUNDLE_REJECT_CASES = (
+    ("missing-required-artifact", "no artifact declares ref 'artifact:repo-status'"),
+    ("duplicate-artifact-ref", "duplicate artifact ref 'artifact:diff'"),
+    ("duplicate-artifact-path", "duplicate artifact path"),
+    ("malformed-ref", "artifact reference does not match the required format"),
+    ("external-url-ref", "artifact reference is a URL"),
+    ("absolute-path", "artifact path must be relative to the bundle directory"),
+    ("parent-traversal-path", "artifact path must not contain '..'"),
+    ("git-directory-path", "artifact path points into .git"),
+    ("missing-artifact-file", "artifact path does not exist"),
+    ("directory-path", "artifact path is a directory"),
+    ("missing-sha256", "missing required field 'sha256'"),
+    ("hash-mismatch", "sha256 mismatch"),
+    ("work-unit-mismatch", "the executor-evidence artifact records work_unit_id"),
+    ("cross-review-work-unit-mismatch", "the cross-review artifact records work_unit_id"),
+    ("cross-review-subject-mismatch", "cross_review.subject.executor_evidence_ref"),
+    ("cross-review-subject-diff-mismatch", "cross_review.subject.diff_ref"),
+    ("cross-review-subject-repo-status-mismatch", "cross_review.subject.repo_status_ref"),
+    ("cross-review-subject-packet-mismatch", "cross_review.subject.packet_ref"),
+    (
+        "executor-evidence-invalid",
+        "the executor_evidence artifact was rejected by scripts/validate-executor-evidence.sh",
+    ),
+    (
+        "cross-review-invalid",
+        "the cross_review artifact was rejected by scripts/validate-cross-review.sh",
+    ),
+    (
+        "promotion-authority-claimed",
+        "authority.promotion_authorized_by_this_bundle must always be false",
+    ),
 )
 
 
@@ -2064,6 +2114,229 @@ def scenario_cross_review_examples_are_sanitized() -> tuple[bool, str]:
     return True, "cross-review examples carry no credential, absolute path, or private hostname"
 
 
+def run_evidence_bundle_validator(document: Path) -> Command:
+    """Run the evidence-bundle validator over one manifest."""
+    if BASH is None:
+        raise RuntimeError("bash is required to execute scripts/validate-evidence-bundle.sh")
+    return run([BASH, str(EVIDENCE_BUNDLE_VALIDATOR), str(document)], ROOT)
+
+
+def evidence_bundle_fixture(stem: str, kind: str) -> Path:
+    return EVIDENCE_BUNDLE_EXAMPLES / f"{stem}.{kind}.json"
+
+
+def scenario_evidence_bundle_accepts(stem: str) -> tuple[bool, str]:
+    fixture = evidence_bundle_fixture(stem, "valid")
+    if not fixture.is_file():
+        return False, f"missing valid fixture: {fixture.name}"
+    try:
+        result = run_evidence_bundle_validator(fixture)
+    except Exception as error:
+        return False, f"{fixture.name}: validator could not be run: {error}"
+    if result.returncode != 0:
+        return (
+            False,
+            f"{fixture.name}: validator exited {result.returncode}, expected 0: "
+            f"{result.output.strip()}",
+        )
+    return True, f"{fixture.name} accepted"
+
+
+def scenario_evidence_bundle_rejects(stem: str, expected_reason: str) -> tuple[bool, str]:
+    fixture = evidence_bundle_fixture(stem, "invalid")
+    if not fixture.is_file():
+        return False, f"missing invalid fixture: {fixture.name}"
+    try:
+        result = run_evidence_bundle_validator(fixture)
+    except Exception as error:
+        return False, f"{fixture.name}: validator could not be run: {error}"
+    if result.returncode != 1:
+        return (
+            False,
+            f"{fixture.name}: validator exited {result.returncode}, expected 1: "
+            f"{result.output.strip()}",
+        )
+    if expected_reason not in result.output:
+        return (
+            False,
+            f"{fixture.name}: validator omitted expected reason {expected_reason!r}: "
+            f"{result.output.strip()}",
+        )
+    return True, f"{fixture.name} rejected: {expected_reason}"
+
+
+def scenario_evidence_bundle_fixture_set_is_canonical() -> tuple[bool, str]:
+    """Manifests are registered by name; the shared artifacts tree is not a manifest."""
+    if not EVIDENCE_BUNDLE_EXAMPLES.is_dir():
+        return False, f"missing fixture directory: {EVIDENCE_BUNDLE_EXAMPLES}"
+    expected_valid = {f"{stem}.valid.json" for stem in EVIDENCE_BUNDLE_VALID_CASES}
+    expected_invalid = {f"{stem}.invalid.json" for stem, _ in EVIDENCE_BUNDLE_REJECT_CASES}
+    expected = expected_valid | expected_invalid
+    present = {path.name for path in EVIDENCE_BUNDLE_EXAMPLES.iterdir() if path.is_file()}
+    missing = sorted(expected - present)
+    unexpected = sorted(present - expected)
+    if missing:
+        return False, "evidence-bundle manifests missing from the canonical set: " + ", ".join(missing)
+    if unexpected:
+        return False, "evidence-bundle manifests outside the canonical set: " + ", ".join(unexpected)
+    return True, (
+        f"{len(expected_valid)} valid and {len(expected_invalid)} invalid evidence-bundle "
+        f"manifests, each registered by name"
+    )
+
+
+def scenario_evidence_bundle_reference_format_matches_evidence_reference() -> tuple[bool, str]:
+    """The bundle's artifact reference is the artifact-only narrowing of the shared format.
+
+    Pass one resolves nothing but ``artifact:`` references, so the bundle schema
+    cannot simply reuse the four-scheme pattern. Restating a narrowed copy is
+    only safe if something fails when the two drift, so the narrowing is derived
+    from the shared pattern here rather than typed out twice.
+    """
+    for path in (EVIDENCE_BUNDLE_SCHEMA, CROSS_REVIEW_SCHEMA):
+        if not path.is_file():
+            return False, f"missing schema: {path}"
+    try:
+        bundle = json.loads(EVIDENCE_BUNDLE_SCHEMA.read_text(encoding="utf-8"))
+        cross = json.loads(CROSS_REVIEW_SCHEMA.read_text(encoding="utf-8"))
+        bundle_pattern = bundle["$defs"]["artifact_reference"]["pattern"]
+        shared_pattern = cross["$defs"]["evidence_reference"]["pattern"]
+    except Exception as error:
+        return False, f"could not read both reference patterns: {error}"
+    expected = shared_pattern.replace("(artifact|file|commit|run)", "artifact")
+    if expected == shared_pattern:
+        return False, (
+            f"the shared evidence-reference pattern no longer carries the scheme alternation "
+            f"this narrowing is derived from: {shared_pattern!r}"
+        )
+    if bundle_pattern != expected:
+        return False, (
+            f"artifact-reference pattern has drifted: evidence-bundle {bundle_pattern!r} "
+            f"is not the artifact-only narrowing {expected!r} of {shared_pattern!r}"
+        )
+    return True, "evidence-bundle narrows the shared evidence-reference format to artifact:"
+
+
+def copied_evidence_bundle(destination: Path) -> Path:
+    """Copy the fixture bundle tree so a scenario can mutate it in a temporary directory."""
+    shutil.copytree(EVIDENCE_BUNDLE_EXAMPLES, destination)
+    return destination
+
+
+def rehash(manifest: Path, ref: str) -> None:
+    """Recompute one artifact's recorded digest after a scenario rewrote the file."""
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    for entry in document["evidence_bundle"]["artifacts"]:
+        if entry["ref"] == ref:
+            target = manifest.parent / entry["path"]
+            entry["sha256"] = hashlib.sha256(target.read_bytes()).hexdigest()
+    write_text(manifest, json.dumps(document, indent=2) + "\n")
+
+
+def scenario_evidence_bundle_does_not_replay_commands() -> tuple[bool, str]:
+    """Commands inside executor-evidence are records. Resolving a bundle never runs them.
+
+    The bundle validator opens the executor-evidence artifact, which is exactly
+    the step that could turn a recorded command into an executed one. The
+    recorded command here would leave a file behind, so the absence of that file
+    is the assertion rather than an inspection of the validator's prose.
+    """
+    try:
+        with tempfile.TemporaryDirectory(prefix="director-evidence-bundle-") as temporary:
+            temp = Path(temporary)
+            bundle = copied_evidence_bundle(temp / "bundle")
+            sentinel = temp / "replayed"
+            evidence_path = bundle / "artifacts" / "executor-evidence.json"
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            evidence["executor_evidence"]["verification"]["commands_run"][1]["command"] = (
+                f"printf replayed > {sentinel}"
+            )
+            write_text(evidence_path, json.dumps(evidence, indent=2) + "\n")
+            manifest = bundle / "minimal-fulfilled.valid.json"
+            rehash(manifest, "artifact:executor-evidence")
+            result = run_evidence_bundle_validator(manifest)
+            replayed = sentinel.exists()
+    except Exception as error:
+        return False, f"scenario could not be built or exercised: {error}"
+    if replayed:
+        return False, "the validator executed a recorded command — the sentinel file was written"
+    if result.returncode != 0:
+        return False, f"validator exited {result.returncode}, expected 0: {result.output.strip()}"
+    return True, "recorded commands are read as evidence and never executed"
+
+
+def scenario_evidence_bundle_rejects_symlink_artifact() -> tuple[Optional[bool], str]:
+    """A symlinked artifact is refused even when its content hashes correctly.
+
+    The target here is byte-identical to the real artifact, so a validator that
+    resolved the link would accept. Only the symlink rule can reject this, which
+    is what makes it a test of that rule rather than of the hash check.
+    """
+    try:
+        with tempfile.TemporaryDirectory(prefix="director-evidence-bundle-") as temporary:
+            temp = Path(temporary)
+            bundle = copied_evidence_bundle(temp / "bundle")
+            artifact = bundle / "artifacts" / "diff.txt"
+            outside = temp / "identical-diff.txt"
+            shutil.copy2(artifact, outside)
+            artifact.unlink()
+            try:
+                artifact.symlink_to(outside)
+            except (OSError, NotImplementedError) as error:
+                return None, f"symlinks are unavailable in this environment: {error}"
+            manifest = bundle / "minimal-fulfilled.valid.json"
+            result = run_evidence_bundle_validator(manifest)
+    except Exception as error:
+        return False, f"scenario could not be built or exercised: {error}"
+    if result.returncode != 1:
+        return False, f"validator exited {result.returncode}, expected 1: {result.output.strip()}"
+    if "artifact path is a symlink" not in result.output:
+        return False, f"validator did not name the symlink rule: {result.output.strip()}"
+    return True, "a symlinked artifact is rejected even when its target hashes correctly"
+
+
+def scenario_evidence_bundle_validator_has_no_network_surface() -> tuple[bool, str]:
+    """No bundle can be completed by fetching something.
+
+    The URL-reference fixture proves a URL is rejected. It cannot prove the
+    validator has no way to fetch at all, and a check whose safety depends on
+    every future edit avoiding a network call needs something that fails when
+    one is added.
+    """
+    if not EVIDENCE_BUNDLE_VALIDATOR.is_file():
+        return False, f"missing validator: {EVIDENCE_BUNDLE_VALIDATOR}"
+    source = EVIDENCE_BUNDLE_VALIDATOR.read_text(encoding="utf-8")
+    forbidden = (
+        "urllib",
+        "http.client",
+        "requests",
+        "socket",
+        "ftplib",
+        "curl",
+        "wget",
+        "urlopen",
+        "subprocess.getoutput",
+    )
+    found = sorted(name for name in forbidden if name in source)
+    if found:
+        return False, "the validator carries a network or fetch surface: " + ", ".join(found)
+    return True, "the validator has no import or command able to dereference a network reference"
+
+
+def scenario_evidence_bundle_examples_are_sanitized() -> tuple[bool, str]:
+    if BASH is None:
+        return False, "bash is required to execute scripts/check-example-sanitization.sh"
+    if not EVIDENCE_BUNDLE_EXAMPLES.is_dir():
+        return False, f"missing fixture directory: {EVIDENCE_BUNDLE_EXAMPLES}"
+    try:
+        result = run([BASH, str(EXAMPLE_SANITIZER), str(EVIDENCE_BUNDLE_EXAMPLES)], ROOT)
+    except Exception as error:
+        return False, f"sanitizer could not be run: {error}"
+    if result.returncode != 0:
+        return False, f"sanitizer rejected the evidence-bundle examples: {result.output.strip()}"
+    return True, "evidence-bundle examples carry no credential, absolute path, or private hostname"
+
+
 def scenario_example_sanitizer_accepts_public_examples() -> tuple[bool, str]:
     if BASH is None:
         return False, "bash is required to execute scripts/check-example-sanitization.sh"
@@ -2187,6 +2460,17 @@ def main() -> int:
         scenario_cross_review_reference_format_matches_executor_evidence(),
         scenario_cross_review_does_not_dereference_subject(),
         scenario_cross_review_examples_are_sanitized(),
+        *(scenario_evidence_bundle_accepts(stem) for stem in EVIDENCE_BUNDLE_VALID_CASES),
+        *(
+            scenario_evidence_bundle_rejects(stem, reason)
+            for stem, reason in EVIDENCE_BUNDLE_REJECT_CASES
+        ),
+        scenario_evidence_bundle_fixture_set_is_canonical(),
+        scenario_evidence_bundle_reference_format_matches_evidence_reference(),
+        scenario_evidence_bundle_does_not_replay_commands(),
+        scenario_evidence_bundle_rejects_symlink_artifact(),
+        scenario_evidence_bundle_validator_has_no_network_surface(),
+        scenario_evidence_bundle_examples_are_sanitized(),
         scenario_branch_state_squash_landed_exact(),
         scenario_branch_state_main_superset(),
         scenario_branch_state_not_landed_blocks(),

@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Nercari/director-core/schemas/evidence-bundle.schema.json",
+  "title": "Evidence bundle manifest",
+  "description": "A local, self-contained set of artifacts for one work unit, listed by reference and pinned by digest. Every artifact is a file inside the bundle directory: nothing here is fetched, dereferenced over a network, or executed. The bundle proves that the references used by executor-evidence and cross-review resolve to inspectable local files whose bytes are the ones recorded. It proves nothing about human behavior, restricted-account execution, OS sandboxing, network containment, or credential isolation, and it grants no authority to commit, push, open a pull request, merge, deploy, or promote anything.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["evidence_bundle"],
+  "properties": {
+    "evidence_bundle": { "$ref": "#/$defs/bundle" }
+  },
+  "$defs": {
+    "non_empty_string": {
+      "type": "string",
+      "minLength": 1
+    },
+    "artifact_reference": {
+      "description": "A pointer to an artifact carried by this bundle. Deliberately the artifact-only narrowing of schemas/cross-review.schema.json#/$defs/evidence_reference: pass one resolves nothing else, so a 'file:', 'commit:', or 'run:' reference — which names something outside the bundle — is refused rather than silently skipped. A conformance scenario derives this pattern from the shared one so the two cannot drift.",
+      "type": "string",
+      "pattern": "^artifact:[A-Za-z0-9._/-]+$"
+    },
+    "artifact_path": {
+      "description": "A path to a file inside the bundle directory, relative to the manifest. The remaining rules — no absolute path, no '..', no .git, no symlink, no directory, no URL or drive syntax, no shell metacharacter — are enforced by scripts/validate-evidence-bundle.sh, where a rejection can name which rule refused it.",
+      "type": "string",
+      "minLength": 1
+    },
+    "sha256": {
+      "description": "Lowercase hex digest of the artifact's bytes. Recomputed on every validation; a recorded digest is a claim until it is.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "artifact_kind": {
+      "description": "Public artifact kind. Narrow on purpose: 'other' is for something real that this list does not name, never a way to avoid declaring what an artifact is.",
+      "enum": [
+        "packet",
+        "result",
+        "executor_evidence",
+        "cross_review",
+        "diff",
+        "repo_status",
+        "test_log",
+        "acceptance_map",
+        "other"
+      ]
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "kind", "path", "media_type", "sha256", "required"],
+      "properties": {
+        "ref": { "$ref": "#/$defs/artifact_reference" },
+        "kind": { "$ref": "#/$defs/artifact_kind" },
+        "path": { "$ref": "#/$defs/artifact_path" },
+        "media_type": { "$ref": "#/$defs/non_empty_string" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "required": { "type": "boolean" }
+      }
+    },
+    "refs": {
+      "description": "The six references a bundle names for one work unit. Every one is required as a key, because 'this bundle does not say' and 'this bundle says there is none' are different records. packet_ref and result_ref need not carry an artifact in pass one; if they do, that artifact resolves and hash-checks like any other.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "packet_ref",
+        "result_ref",
+        "executor_evidence_ref",
+        "cross_review_ref",
+        "diff_ref",
+        "repo_status_ref"
+      ],
+      "properties": {
+        "packet_ref": { "$ref": "#/$defs/artifact_reference" },
+        "result_ref": { "$ref": "#/$defs/artifact_reference" },
+        "executor_evidence_ref": { "$ref": "#/$defs/artifact_reference" },
+        "cross_review_ref": { "$ref": "#/$defs/artifact_reference" },
+        "diff_ref": { "$ref": "#/$defs/artifact_reference" },
+        "repo_status_ref": { "$ref": "#/$defs/artifact_reference" }
+      }
+    },
+    "authority": {
+      "description": "What this bundle says about promotion, which is only ever nothing. Stated as explicit always-false fields rather than left to prose, so a bundle that claims otherwise is rejected by a check instead of by a reader.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "promotion_authorized_by_this_bundle",
+        "merge_authorized_by_this_bundle"
+      ],
+      "properties": {
+        "promotion_authorized_by_this_bundle": {
+          "description": "Always false. Resolving evidence is not authorizing anything.",
+          "type": "boolean"
+        },
+        "merge_authorized_by_this_bundle": {
+          "description": "Always false. The operator merges, by hand, after watching the behavior check.",
+          "type": "boolean"
+        }
+      }
+    },
+    "bundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "bundle_id",
+        "work_unit_id",
+        "refs",
+        "artifacts",
+        "authority"
+      ],
+      "properties": {
+        "schema_version": { "$ref": "#/$defs/non_empty_string" },
+        "bundle_id": { "$ref": "#/$defs/non_empty_string" },
+        "work_unit_id": { "$ref": "#/$defs/non_empty_string" },
+        "refs": { "$ref": "#/$defs/refs" },
+        "artifacts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/artifact" }
+        },
+        "authority": { "$ref": "#/$defs/authority" }
+      }
+    }
+  }
+}
