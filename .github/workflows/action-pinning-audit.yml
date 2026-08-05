@@ -1,0 +1,48 @@
+name: action-pinning-audit
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "13 4 1 * *"
+      timezone: "America/Fortaleza"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: report-unpinned-actions
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Report action references not pinned by SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tmp="$(mktemp)"
+          grep -RInE '^[[:space:]]*-[[:space:]]*uses:[[:space:]]*[^#]+'             .github/workflows .github/actions 2>/dev/null             | grep -Ev '@[0-9a-fA-F]{40}([[:space:]#]|$)'             | tee "$tmp" || true
+
+          if [ -s "$tmp" ]; then
+            {
+              echo "### Action pinning audit"
+              echo
+              echo "The following action references use tags or branches rather than full commit SHAs:"
+              echo
+              sed 's/^/- `/' "$tmp" | sed 's/$/`/'
+              echo
+              echo "This is report-only. Decide case-by-case before pinning."
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            echo "::warning title=Unpinned action references::See the job summary for report-only findings."
+          else
+            echo "All workflow action references appear pinned by SHA." >> "$GITHUB_STEP_SUMMARY"
+          fi
