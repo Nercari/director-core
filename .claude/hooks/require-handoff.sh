@@ -99,7 +99,39 @@ enforce_layer2_record() {
                 | .key' "$SCHEMA" | strip_cr)
 }
 
+# Same vendor on both sides of a review is not independent Layer 2. Stacked
+# checks only multiply safety when they fail independently, so a reviewer from
+# the executor's own vendor collapses the property the layer exists for.
+#
+# Honest self-review stays available: a cycle may declare it, end normally, and
+# remain ineligible for auto-merge (which is off globally and denied by
+# block-dangerous-bash.sh). What is refused is the undeclared case — two models
+# from one vendor presented as an independent review. Declaring the flag makes
+# that situation visible and costly; it does not make it independent, and it is
+# not a cheaper path than using a reviewer from another vendor.
+#
+# Runs after enforce_layer2_record, so both vendors are already known to be in
+# the schema's enumeration and self_review is already known to be a boolean.
+enforce_layer2_independence() {
+  local executor reviewer self_review run_id
+  executor="$(jq -r '.layer2.executor_vendor // ""' "$HANDOFF" | strip_cr)"
+  reviewer="$(jq -r '.layer2.reviewer_vendor // ""' "$HANDOFF" | strip_cr)"
+  # Read directly, with no `// ""` alternative: jq's `//` fires on false as well
+  # as null, so the alternative form turns self_review: false into an empty
+  # string and this comparison would never match — the rule would be dead code
+  # that reads as if it were enforcing something.
+  self_review="$(jq -r '.layer2.self_review' "$HANDOFF" | strip_cr)"
+  run_id="$(jq -r '.run_id // "<missing-run-id>"' "$HANDOFF" | strip_cr)"
+
+  if [ "$executor" = "$reviewer" ] && [ "$self_review" = "false" ]; then
+    deny "same-vendor review cannot end cycle run_id=$run_id;\
+ executor_vendor=$executor; reviewer_vendor=$reviewer;\
+ declare layer2.self_review=true or use a reviewer from a different vendor"
+  fi
+}
+
 enforce_layer2_record
+enforce_layer2_independence
 
 if command -v check-jsonschema >/dev/null 2>&1; then
   if ! check-jsonschema --schemafile "$SCHEMA" "$HANDOFF" >/dev/null 2>&1; then
