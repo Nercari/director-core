@@ -112,6 +112,34 @@ expect_allow() {
   fi
 }
 
+# expect_message <label> <hook> <json> <substring> ...
+# Asserts the refusal AND what it says. A gate that blocks for an unreadable
+# reason sends the operator to the source to find out what happened, so the
+# wording is part of the contract, not decoration.
+expect_message() {
+  local label="$1" hook="$2" json="$3" code output missing=""
+  shift 3
+  output="$(printf '%s' "$json" | PATH="$HOOK_PATH" bash "$HOOKS/$hook" 2>&1)"
+  code=$?
+  if [ "$code" -ne 2 ]; then
+    printf '  [FAIL]  NOT blocked (exit %s): %s\n' "$code" "$label"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  for expected in "$@"; do
+    case "$output" in
+      *"$expected"*) : ;;
+      *) missing="${missing:+$missing, }$expected" ;;
+    esac
+  done
+  if [ -n "$missing" ]; then
+    printf '  [FAIL]  blocked but the message omitted: %s — %s\n' "$missing" "$label"
+    FAILURES=$((FAILURES + 1))
+  else
+    printf '  [ OK ]  blocked, and said why: %s\n' "$label"
+  fi
+}
+
 # assert_worktree_active_file proves the lifecycle command creates and removes
 # the hook control in an isolated Git fixture. The fixture keeps this selftest
 # from creating a real unit or changing this repository's history.
@@ -182,11 +210,44 @@ run_layer2_cases() {
   printf '%s\n' "$VALID_HANDOFF" > "$HANDOFF_FILE"
   expect_allow "$path_label: two recognised vendors" require-handoff.sh '{}'
 
-  printf '%s\n' "$(printf '%s' "$VALID_HANDOFF" | jq '.layer2.reviewer_vendor = .layer2.executor_vendor')" > "$HANDOFF_FILE"
-  expect_allow "$path_label: identical vendors permitted" require-handoff.sh '{}'
+  # The three cases that carry the policy. Labels say what is allowed and what
+  # is refused, so a reader of the output learns the rule without reading the
+  # hook: same vendor is permitted only when the handoff declares self-review.
+  printf '%s\n' "$(printf '%s' "$VALID_HANDOFF" \
+    | jq '.layer2.reviewer_vendor = .layer2.executor_vendor | .layer2.self_review = true')" \
+    > "$HANDOFF_FILE"
+  expect_allow "$path_label: same vendor with self_review declared is allowed" \
+    require-handoff.sh '{}'
 
   printf '%s\n' "$(printf '%s' "$VALID_HANDOFF" | jq '.layer2.self_review = false')" > "$HANDOFF_FILE"
-  expect_allow "$path_label: false self_review permitted" require-handoff.sh '{}'
+  expect_allow "$path_label: different vendors without self_review is allowed" \
+    require-handoff.sh '{}'
+
+  printf '%s\n' "$(printf '%s' "$VALID_HANDOFF" \
+    | jq '.layer2.reviewer_vendor = .layer2.executor_vendor | .layer2.self_review = false')" \
+    > "$HANDOFF_FILE"
+  expect_block "$path_label: same vendor without self_review is refused" \
+    require-handoff.sh '{}'
+  expect_message "$path_label: refusal names the unit, both vendors, and the rule" \
+    require-handoff.sh '{}' \
+    'run_id=selftest' 'executor_vendor=openai' 'reviewer_vendor=openai' \
+    'same-vendor review cannot end cycle' 'layer2.self_review=true'
+
+  # Adjacent, and not what the same-vendor rule was written to catch: a route
+  # whose declared vendor agrees with the executor must not launder a
+  # same-vendor pair. Passing one check is not passing the other.
+  printf '%s\n' "$(printf '%s' "$VALID_HANDOFF" \
+    | jq '.layer2.reviewer_vendor = .layer2.executor_vendor
+          | .layer2.self_review = false
+          | .workflow_efficiency = {work_unit_route: "EXEC_STRONG"}')" > "$HANDOFF_FILE"
+  expect_block "$path_label: agreeing route vendor does not excuse a same-vendor pair" \
+    require-handoff.sh '{}'
+
+  # Also adjacent: declaring self-review while the vendors differ is an honest
+  # over-declaration, not a violation, and must keep ending the cycle.
+  printf '%s\n' "$(printf '%s' "$VALID_HANDOFF" | jq '.layer2.self_review = true')" > "$HANDOFF_FILE"
+  expect_allow "$path_label: declared self_review with different vendors is allowed" \
+    require-handoff.sh '{}'
 
   printf '%s\n' "$(printf '%s' "$VALID_HANDOFF" | jq '.workflow_efficiency = {work_unit_route: null}')" > "$HANDOFF_FILE"
   expect_allow "$path_label: null work_unit_route skips lookup" require-handoff.sh '{}'
