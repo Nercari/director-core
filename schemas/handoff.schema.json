@@ -58,7 +58,10 @@
       "properties": {
         "executor_vendor": { "enum": ["anthropic", "openai", "google"] },
         "reviewer_vendor": { "enum": ["anthropic", "openai", "google"] },
-        "self_review": { "type": "boolean" }
+        "self_review": {
+          "description": "When true, the cycle declares that the reviewer is not independent from the executor. A cycle whose executor_vendor and reviewer_vendor are the same may end only when this is true, and it stays ineligible for auto-merge. Declaring it makes a non-independent review visible and costly; it does not make the review independent.",
+          "type": "boolean"
+        }
       }
     },
     "blocked_on": { "type": ["string", "null"] },
