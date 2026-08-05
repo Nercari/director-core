@@ -1,0 +1,36 @@
+{
+  "published_at": "2026-07-29T14:30:05.250+02:00",
+  "run_id": "parity-populated",
+  "capacity_state": "A",
+  "objective": "exercise every field the degraded path newly inspects, in its valid form",
+  "repository_state": {
+    "main_commit": "0123456789abcdef0123456789abcdef01234567",
+    "open_branches": ["task/example-unit"],
+    "open_pull_requests": ["example-unit"],
+    "worktrees": ["example-unit"],
+    "lock_held": false
+  },
+  "decisions_taken": [
+    {
+      "decision": "PROMOTE",
+      "unit_id": "example-unit",
+      "rationale": "Criteria met, tests pass, scope respected."
+    },
+    {
+      "decision": "REJECT",
+      "rationale": "Out of scope for this unit; unit_id is optional and omitted here."
+    }
+  ],
+  "next_action": "stop",
+  "layer2": {
+    "executor_vendor": "openai",
+    "reviewer_vendor": "anthropic",
+    "self_review": false
+  },
+  "blocked_on": null,
+  "unresolved_risks": ["the operator behavior check has not been run"],
+  "workflow_efficiency": {
+    "work_unit_route": null,
+    "validation_passed": true
+  }
+}

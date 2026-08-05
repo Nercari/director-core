@@ -75,6 +75,14 @@ absent_path() {
 ABSENT_PATH="$(absent_path)"
 PRESENT_PATH="$(stub_dir accept):$PATH"
 
+# The parity corpus needs a different present-path oracle from the one above.
+# PRESENT_PATH is a stub that exits 0, which selects the validator-present
+# branch but answers every question "valid" — useful for proving the branch is
+# taken, useless for proving the two branches agree about what the schema says.
+# Parity uses the unmodified PATH, so the present arm is the real validator.
+REAL_PRESENT_PATH="$PATH"
+PARITY_DIR="$HOOKS/fixtures/handoff-parity"
+
 VALID_HANDOFF='{"published_at":"2026-07-27T00:00:00Z","run_id":"selftest","capacity_state":"A","objective":"exercise the hook","repository_state":{"main_commit":"0123456","open_branches":[],"open_pull_requests":[]},"decisions_taken":[],"next_action":"stop","layer2":{"executor_vendor":"openai","reviewer_vendor":"anthropic","self_review":true}}'
 
 if [ -f "$ACTIVE_FILE" ]; then
@@ -262,6 +270,84 @@ run_layer2_cases() {
   expect_block "$path_label: route has no vendor key" require-handoff.sh '{}'
 }
 
+# parity_verdict <path> <fixture> — prints allow, block, or error(<code>).
+# Deliberately reduces the hook to its only external behaviour. Comparing
+# verdicts is the point; stderr wording differs between the two paths by design
+# and comparing that would fail on cosmetics rather than on policy.
+parity_verdict() {
+  local path_value="$1" fixture="$2" code
+  cp "$fixture" "$HANDOFF_FILE"
+  printf '{}' | PATH="$path_value" bash "$HOOKS/require-handoff.sh" >/dev/null 2>&1
+  code=$?
+  case "$code" in
+  0) printf 'allow' ;;
+  2) printf 'block' ;;
+  *) printf 'error(%s)' "$code" ;;
+  esac
+}
+
+# One corpus, both paths, verdicts compared. The gate is only as strong as its
+# weakest path, and until this ran nothing recomputed whether the degraded path
+# had drifted wider than the validated one. It had.
+#
+# Two distinct failures are reported separately because they mean different
+# things: the paths disagreeing is the defect this exists to catch, and the
+# paths agreeing on the wrong answer means the corpus and the schema have
+# parted company.
+run_parity_corpus() {
+  local fixture name expected present absent
+  if [ ! -d "$PARITY_DIR" ]; then
+    printf '  [FAIL]  parity corpus directory is missing: %s\n' "$PARITY_DIR"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  # The present arm must be the real validator. A skip is honest on a machine
+  # without it, but silence in CI would let the whole suite lapse unnoticed —
+  # and CI installs the validator before running this, so absence there is a
+  # broken gate rather than a missing convenience.
+  if ! command -v check-jsonschema >/dev/null 2>&1; then
+    if [ -n "${CI:-}" ]; then
+      printf '  [FAIL]  check-jsonschema is absent in CI, so the parity corpus cannot\n'
+      printf '          be checked against a real validator. gate.yml installs it before\n'
+      printf '          this step; if that changed, parity is no longer being enforced.\n'
+      FAILURES=$((FAILURES + 1))
+    else
+      printf '  [SKIP]  check-jsonschema is not installed here, so the validator-present\n'
+      printf '          oracle is unavailable. CI installs it and runs this suite there.\n'
+    fi
+    return
+  fi
+
+  printf '%s\n' "$ROOT/.selftest-active-worktree" > "$ACTIVE_FILE"
+  for fixture in "$PARITY_DIR"/*.json; do
+    [ -f "$fixture" ] || continue
+    name="$(basename "$fixture")"
+    case "$name" in
+    valid-*) expected=allow ;;
+    invalid-*) expected=block ;;
+    *)
+      printf '  [FAIL]  %s: a parity fixture must be named valid-* or invalid-*, so the\n' "$name"
+      printf '          expected verdict is declared rather than inferred\n'
+      FAILURES=$((FAILURES + 1))
+      continue
+      ;;
+    esac
+    present="$(parity_verdict "$REAL_PRESENT_PATH" "$fixture")"
+    absent="$(parity_verdict "$ABSENT_PATH" "$fixture")"
+    if [ "$present" != "$absent" ]; then
+      printf '  [FAIL]  PATH DIVERGENCE %s — validator present: %s, validator absent: %s\n' \
+        "$name" "$present" "$absent"
+      FAILURES=$((FAILURES + 1))
+    elif [ "$present" != "$expected" ]; then
+      printf '  [FAIL]  both paths agree on the wrong verdict for %s — %s, expected %s\n' \
+        "$name" "$present" "$expected"
+      FAILURES=$((FAILURES + 1))
+    else
+      printf '  [ OK ]  %s — present: %s, absent: %s\n' "$name" "$present" "$absent"
+    fi
+  done
+}
+
 echo "hook selftest"
 echo
 echo "block-dangerous-bash — must refuse"
@@ -328,6 +414,10 @@ expect_block "bad capacity_state still blocked by fallback" require-handoff.sh '
 echo
 echo "require-handoff Layer 2 — validator present path"
 run_layer2_cases "validator present" "$PRESENT_PATH"
+
+echo
+echo "require-handoff validator-path parity — one corpus, both paths, verdicts compared"
+run_parity_corpus
 
 HOOK_PATH="$ABSENT_PATH"
 printf '%s\n' "$VALID_HANDOFF" > "$HANDOFF_FILE"

@@ -129,15 +129,29 @@ echo "--- no unit in flight: an ordinary conversation is not a cycle"
 check ALLOWED "no active worktree, no handoff" absent no OMIT
 check ALLOWED "no active worktree, junk handoff" absent no '{}'
 
-echo "--- the gap this path leaves, asserted rather than implied"
-# additionalProperties: false in the schema, but the degraded path does not
-# check it. An unknown field is therefore PERMITTED here and REFUSED once the
-# validator is installed. Asserting it keeps the difference visible instead of
-# leaving an operator to discover it in CI.
-check ALLOWED "unknown field, validator absent" absent yes \
+echo "--- the gap this path used to leave, now closed and asserted in both directions"
+# This pair used to assert the opposite: ALLOWED without the validator, DENIED
+# with it. additionalProperties: false was in the schema and the degraded path
+# did not read it, so the gate was measurably wider on the operator's machine
+# than in CI. Asserting the divergence kept it visible, which was the right
+# thing to do while it stood, but visible is not fixed.
+#
+# The degraded path now reads that rule, and the four sibling rules it was
+# skipping, out of the schema. .claude/hooks/selftest.sh runs a shared fixture
+# corpus through both paths and fails on any verdict that differs, so this pair
+# is a demonstration for the operator rather than the thing holding the line.
+check DENIED "unknown field, validator absent" absent yes \
   "$(printf '%s' "$VALID" | jq '.invented_field = "not in the schema"')"
 check DENIED "unknown field, validator present" refuse yes \
   "$(printf '%s' "$VALID" | jq '.invented_field = "not in the schema"')"
+check DENIED "decisions_taken item is prose, validator absent" absent yes \
+  "$(printf '%s' "$VALID" | jq '.decisions_taken = ["I decided to promote it"]')"
+check DENIED "open_pull_requests item is a number, validator absent" absent yes \
+  "$(printf '%s' "$VALID" | jq '.repository_state.open_pull_requests = [71]')"
+check DENIED "main_commit is not a commit, validator absent" absent yes \
+  "$(printf '%s' "$VALID" | jq '.repository_state.main_commit = "not-a-sha"')"
+check DENIED "published_at is not a date-time, validator absent" absent yes \
+  "$(printf '%s' "$VALID" | jq '.published_at = "yesterday"')"
 
 if [ "$FAILURES" -ne 0 ]; then
   printf 'handoff degradation demo FAILED: %s wrong verdict(s)\n' "$FAILURES" >&2
