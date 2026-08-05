@@ -243,6 +243,41 @@ else
 fi
 
 echo
+echo "branch state (supersession)"
+
+# Whether a pull request's content is already on the base is a content question,
+# and the three-dot diff that used to answer it here answers a different one: it
+# stays non-empty after a squash merge, so landed work read as unreachable and
+# sequencing decisions were made on it. scripts/branch-state.sh computes both
+# signals and takes its status from content only. This section stays quiet
+# unless a head is supplied, because most preflights have no pull request in
+# question and a check with nothing to check should say so rather than pass.
+BRANCH_STATE="$ROOT/scripts/branch-state.sh"
+supersession_head="${PREFLIGHT_SUPERSESSION_HEAD:-}"
+supersession_base="${PREFLIGHT_SUPERSESSION_BASE:-origin/main}"
+supersession_pr_state="${PREFLIGHT_SUPERSESSION_PR_STATE:-open}"
+
+if [ -z "$supersession_head" ]; then
+  pass "no head supplied — supersession not in question (set PREFLIGHT_SUPERSESSION_HEAD to check one)"
+elif [ ! -f "$BRANCH_STATE" ]; then
+  fail "PREFLIGHT_SUPERSESSION_HEAD is set but $BRANCH_STATE is missing — cannot classify branch state"
+else
+  branch_state_output="$(sh "$BRANCH_STATE" \
+    --repo "$ROOT" \
+    --base "$supersession_base" \
+    --head "$supersession_head" \
+    --pr-state "$supersession_pr_state" 2>&1)"
+  branch_state_rc=$?
+  printf '%s\n' "$branch_state_output" | sed 's/^/          /'
+  case "$branch_state_rc" in
+    0) pass "branch state: content-level check does not block" ;;
+    1) fail "branch state: BLOCKED_BRANCH_STATE — a claimed path has not landed on $supersession_base" ;;
+    2) warn "branch state: UNKNOWN_BRANCH_SUPERSESSION — content could not be classified; fetch the head and re-run rather than assuming it is absent" ;;
+    *) fail "branch state: classifier could not be used (exit $branch_state_rc)" ;;
+  esac
+fi
+
+echo
 if [ "$FAIL" -gt 0 ]; then
   echo "RED — $FAIL failure(s), $WARN warning(s). Do not start work."
   exit 1

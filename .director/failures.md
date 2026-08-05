@@ -651,3 +651,37 @@ The root cause was an oversized, fragile credentialed command payload. The
 remediation now added is a pre-prompt complete command-length guard, a tracked
 short `-File` bootstrap, and an operator-side clean clone. This is evidence for
 the correction, not proof of full issue-59 acceptance.
+
+## 2026-08-05 — a three-dot diff was read as proof that landed work was missing
+
+Branch-state conclusions were drawn from `git diff base...head -- <path>`. That
+command answers "what changed on the head since the merge base". It does not
+answer "is this content already on the base", and after a squash merge, a
+rebase, or a superseding merge the two answers disagree: the head keeps showing
+a non-empty diff while the base already carries the same content or a strict
+superset of it.
+
+Read as reachability, that non-empty output says the work is missing. It was
+used that way more than once while sequencing units, and the wrong conclusion —
+that a landed pull request's content was absent — was reached or nearly reached
+each time. Every squash-merged pull request in this repository is in that shape,
+so the misreading was available on every unit, not an edge case.
+
+**Same class as two entries already here.** The result validator that widened
+`route_used` when its validator was absent, and the handoff hook that checked
+only that a document was well-formed JSON, both drew a strong conclusion from a
+signal that could not support it. This is that shape again: a proxy standing in
+for the measurement, with nothing recomputing whether the proxy still applied.
+
+The threshold in AGENTS.md §"Adding anything" is met, and the correction is a
+script rather than prose: `scripts/branch-state.sh` compares content — blob
+identity first, then a conservative line comparison, and `unknown` when neither
+decides — and `scripts/preflight.sh` takes its status from that. The three-dot
+signal is still computed and still printed, because it is genuinely useful for
+debugging. It no longer decides anything.
+
+**What this does not fix.** It does not prove a pull request's content is what
+its packet claimed, and it says nothing about review, CI, or merge readiness. An
+unfetched ref is reported `unknown`, never "absent" — the failure being closed
+here is precisely the habit of converting "I could not see it" into "it is not
+there".
