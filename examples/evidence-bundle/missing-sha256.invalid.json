@@ -1,0 +1,52 @@
+{
+  "evidence_bundle": {
+    "schema_version": "1",
+    "bundle_id": "missing-sha256",
+    "work_unit_id": "example-unit",
+    "refs": {
+      "packet_ref": "artifact:packet",
+      "result_ref": "artifact:result",
+      "executor_evidence_ref": "artifact:executor-evidence",
+      "cross_review_ref": "artifact:cross-review",
+      "diff_ref": "artifact:diff",
+      "repo_status_ref": "artifact:repo-status"
+    },
+    "artifacts": [
+      {
+        "ref": "artifact:executor-evidence",
+        "kind": "executor_evidence",
+        "path": "artifacts/executor-evidence.json",
+        "media_type": "application/json",
+        "sha256": "9ceec4eb539ad6636d92b767efa758bedb4f400f291d56ebac17388391e630df",
+        "required": true
+      },
+      {
+        "ref": "artifact:cross-review",
+        "kind": "cross_review",
+        "path": "artifacts/cross-review.json",
+        "media_type": "application/json",
+        "sha256": "a929b79504b875ea841c0164a63c5634107671b8b10b12373fe0be8bcc44df61",
+        "required": true
+      },
+      {
+        "ref": "artifact:diff",
+        "kind": "diff",
+        "path": "artifacts/diff.txt",
+        "media_type": "text/plain",
+        "required": true
+      },
+      {
+        "ref": "artifact:repo-status",
+        "kind": "repo_status",
+        "path": "artifacts/repo-status.txt",
+        "media_type": "text/plain",
+        "sha256": "f3e608d023f0e8d402cba85ad27b7ec3636f79b33a60ce9f54048bb6d1bbe52e",
+        "required": true
+      }
+    ],
+    "authority": {
+      "promotion_authorized_by_this_bundle": false,
+      "merge_authorized_by_this_bundle": false
+    }
+  }
+}

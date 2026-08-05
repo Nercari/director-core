@@ -1,0 +1,53 @@
+{
+  "evidence_bundle": {
+    "schema_version": "1",
+    "bundle_id": "blocked-review",
+    "work_unit_id": "example-unit",
+    "refs": {
+      "packet_ref": "artifact:packet",
+      "result_ref": "artifact:result",
+      "executor_evidence_ref": "artifact:executor-evidence",
+      "cross_review_ref": "artifact:cross-review",
+      "diff_ref": "artifact:diff",
+      "repo_status_ref": "artifact:repo-status"
+    },
+    "artifacts": [
+      {
+        "ref": "artifact:executor-evidence",
+        "kind": "executor_evidence",
+        "path": "artifacts/executor-evidence-blocked.json",
+        "media_type": "application/json",
+        "sha256": "ea072328100a97099c343cf316534b59d821e8ca91a93aa361bd55b4df9f1d21",
+        "required": true
+      },
+      {
+        "ref": "artifact:cross-review",
+        "kind": "cross_review",
+        "path": "artifacts/cross-review-blocked.json",
+        "media_type": "application/json",
+        "sha256": "61aa039667c38aed2d72b2a84a0b6ea72cb14096303fdc8223556f1f21d19cc8",
+        "required": true
+      },
+      {
+        "ref": "artifact:diff",
+        "kind": "diff",
+        "path": "artifacts/diff.txt",
+        "media_type": "text/plain",
+        "sha256": "b81779ca521572d91d1a7927164f447b7fe4d8a1b0061d0860571afe67d128d1",
+        "required": true
+      },
+      {
+        "ref": "artifact:repo-status",
+        "kind": "repo_status",
+        "path": "artifacts/repo-status.txt",
+        "media_type": "text/plain",
+        "sha256": "f3e608d023f0e8d402cba85ad27b7ec3636f79b33a60ce9f54048bb6d1bbe52e",
+        "required": true
+      }
+    ],
+    "authority": {
+      "promotion_authorized_by_this_bundle": false,
+      "merge_authorized_by_this_bundle": false
+    }
+  }
+}
