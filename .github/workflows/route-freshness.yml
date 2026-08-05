@@ -1,0 +1,116 @@
+name: route-freshness
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 3"
+      timezone: "America/Fortaleza"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: audit-route-dates
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check route verification dates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          from datetime import date
+          from pathlib import Path
+          import re
+          import sys
+
+          routes_file = Path(".director/routes.yaml")
+          text = routes_file.read_text(encoding="utf-8")
+
+          aliases: dict[str, dict[str, str]] = {}
+          current: str | None = None
+
+          for raw_line in text.splitlines():
+              alias_match = re.match(r"^  ([A-Z][A-Z0-9_]*):\s*$", raw_line)
+              if alias_match:
+                  current = alias_match.group(1)
+                  aliases[current] = {}
+                  continue
+
+              if current is None:
+                  continue
+
+              field_match = re.match(
+                  r"^    ([A-Za-z_][A-Za-z0-9_]*):\s*(.*?)\s*(?:#.*)?$",
+                  raw_line,
+              )
+              if field_match:
+                  key, value = field_match.groups()
+                  aliases[current][key] = value.strip().strip('"').strip("'")
+
+          required = ("ORCH_PRIMARY", "ORCH_FALLBACK", "EXEC_PRIMARY", "EXEC_STRONG")
+          today = date.today()
+          warn_count = 0
+          failed = False
+
+          for alias in required:
+              block = aliases.get(alias)
+              if block is None:
+                  print(f"::error file=.director/routes.yaml::{alias} missing")
+                  failed = True
+                  continue
+
+              raw = block.get("last_verified", "")
+              if not raw:
+                  print(f"::error file=.director/routes.yaml::{alias} has no last_verified")
+                  failed = True
+                  continue
+
+              try:
+                  verified = date.fromisoformat(raw)
+              except ValueError:
+                  print(
+                      f"::error file=.director/routes.yaml::{alias} last_verified "
+                      f"is not YYYY-MM-DD: {raw}"
+                  )
+                  failed = True
+                  continue
+
+              age_days = (today - verified).days
+              print(f"{alias}: last_verified={verified.isoformat()} age_days={age_days}")
+
+              if age_days < 0:
+                  print(
+                      f"::error file=.director/routes.yaml::{alias} last_verified "
+                      f"is in the future: {verified.isoformat()}"
+                  )
+                  failed = True
+              elif age_days > 180:
+                  print(
+                      f"::error file=.director/routes.yaml::{alias} last_verified "
+                      f"is {age_days}d old (>180); re-run the routing interview"
+                  )
+                  failed = True
+              elif age_days > 90:
+                  warn_count += 1
+                  print(
+                      f"::warning file=.director/routes.yaml::{alias} last_verified "
+                      f"is {age_days}d old (>90)"
+                  )
+
+          if failed:
+              raise SystemExit(1)
+
+          print(f"route freshness passed with {warn_count} warning(s)")
+          PY
