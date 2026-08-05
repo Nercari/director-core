@@ -43,20 +43,8 @@ def resolve(ref):
     return node
 
 
-def kind_of(value):
-    if isinstance(value, bool):
-        return "boolean"
-    if isinstance(value, int):
-        return "integer"
-    if isinstance(value, str):
-        return "string"
-    if isinstance(value, list):
-        return "array"
-    if isinstance(value, dict):
-        return "object"
-    if value is None:
-        return "null"
-    return "number"
+EVIDENCE_PATTERN = resolve("#/$defs/evidence_reference")["pattern"]
+KINDS = {bool: "boolean", int: "integer", str: "string", list: "array", dict: "object"}
 
 
 def check(value, schema, path):
@@ -65,138 +53,117 @@ def check(value, schema, path):
     Deliberately small: enough to interpret the committed schema, no more. An
     unrecognised keyword is ignored rather than guessed at.
     """
-    errors = []
     if "$ref" in schema:
         return check(value, resolve(schema["$ref"]), path)
+    errors = []
+    found = "null" if value is None else KINDS.get(type(value), "number")
 
     if "type" in schema:
-        expected = schema["type"]
-        actual = kind_of(value)
-        allowed = [expected] if isinstance(expected, str) else list(expected)
-        if actual not in allowed:
-            return [f"{path}: expected {'/'.join(allowed)}, found {actual}"]
-
+        allowed = schema["type"] if isinstance(schema["type"], list) else [schema["type"]]
+        if found not in allowed:
+            return [f"{path}: expected {'/'.join(allowed)}, found {found}"]
     if "const" in schema and value != schema["const"]:
         return [f"{path}: expected {json.dumps(schema['const'])}, found {json.dumps(value)}"]
-
     if "enum" in schema and value not in schema["enum"]:
         allowed = ", ".join(json.dumps(option) for option in schema["enum"])
         return [f"{path}: {json.dumps(value)} is not one of [{allowed}]"]
 
-    if isinstance(value, str):
-        if "minLength" in schema and len(value) < schema["minLength"]:
+    if found == "string":
+        if len(value) < schema.get("minLength", 0):
             errors.append(f"{path}: must not be empty")
         pattern = schema.get("pattern")
         if pattern is not None and re.search(pattern, value) is None:
-            if pattern == resolve("#/$defs/evidence_reference")["pattern"]:
-                errors.append(
-                    f"{path}: evidence reference does not match the required format "
-                    f"{pattern} — found {json.dumps(value)}"
-                )
-            else:
-                errors.append(f"{path}: {json.dumps(value)} does not match {pattern}")
+            named = (
+                "evidence reference does not match the required format"
+                if pattern == EVIDENCE_PATTERN
+                else "does not match"
+            )
+            errors.append(f"{path}: {named} {pattern} — found {json.dumps(value)}")
 
-    if isinstance(value, dict):
-        for name in schema.get("required", []):
-            if name not in value:
-                errors.append(f"{path}: missing required field {name!r}")
+    if found == "object":
         properties = schema.get("properties", {})
+        errors += [
+            f"{path}: missing required field {name!r}"
+            for name in schema.get("required", [])
+            if name not in value
+        ]
         if schema.get("additionalProperties") is False:
-            for name in value:
-                if name not in properties:
-                    errors.append(f"{path}: unexpected field {name!r}")
+            errors += [f"{path}: unexpected field {n!r}" for n in value if n not in properties]
         for name, subschema in properties.items():
             if name in value:
-                errors.extend(check(value[name], subschema, f"{path}.{name}"))
+                errors += check(value[name], subschema, f"{path}.{name}")
 
-    if isinstance(value, list) and "items" in schema:
+    if found == "array" and "items" in schema:
         for index, item in enumerate(value):
-            errors.extend(check(item, schema["items"], f"{path}[{index}]"))
+            errors += check(item, schema["items"], f"{path}[{index}]")
 
-    if "oneOf" in schema:
-        branches = [check(value, branch, path) for branch in schema["oneOf"]]
-        matched = [index for index, failures in enumerate(branches) if not failures]
-        if len(matched) != 1:
-            errors.append(
-                f"{path}: command record matches neither the ran shape "
-                f"(command, exit_code, evidence_reference) nor the not-run shape "
-                f"(command, not_run: true, blocker_id or evidence_reference)"
-            )
-
-    if "anyOf" in schema:
-        if all(check(value, branch, path) for branch in schema["anyOf"]):
-            errors.append(f"{path}: satisfies none of the permitted shapes")
-
+    if "oneOf" in schema and sum(not check(value, b, path) for b in schema["oneOf"]) != 1:
+        errors.append(
+            f"{path}: command record matches neither the ran shape "
+            f"(command, exit_code, evidence_reference) nor the not-run shape "
+            f"(command, not_run: true, blocker_id or evidence_reference)"
+        )
+    if "anyOf" in schema and all(check(value, b, path) for b in schema["anyOf"]):
+        errors.append(f"{path}: satisfies none of the permitted shapes")
     return errors
 
 
 def semantic_errors(evidence):
     """Cross-field rules. Plain JSON Schema cannot express these."""
-    errors = []
-    route = evidence["route"]
-    scope = evidence["scope"]
+    route, scope = evidence["route"], evidence["scope"]
     verification = evidence["verification"]
     criteria = evidence["acceptance"]["criteria"]
     commands = verification["commands_run"]
     blocker_ids = {blocker["id"] for blocker in evidence["blockers"]}
+    errors = []
 
-    # Applies at every status: a not-run record that points at a blocker which
-    # does not exist is an unresolvable reference, not an explanation.
+    # Applies at every status: a not-run record pointing at a blocker that does
+    # not exist is an unresolvable reference, not an explanation.
     for index, command in enumerate(commands):
-        if command.get("not_run") is True:
-            named = command.get("blocker_id")
-            if named is not None and named not in blocker_ids:
-                errors.append(
-                    f"verification.commands_run[{index}]: blocker_id {named!r} "
-                    f"matches no entry in blockers[]"
-                )
-
+        named = command.get("blocker_id")
+        if command.get("not_run") is True and named is not None and named not in blocker_ids:
+            errors.append(
+                f"verification.commands_run[{index}]: blocker_id {named!r} "
+                f"matches no entry in blockers[]"
+            )
     if evidence["status"] == "blocked" and not evidence["blockers"]:
         errors.append("status=blocked requires at least one entry in blockers[]")
-
     if evidence["status"] != "fulfilled":
         return errors
 
+    add = errors.append
     if route["route_verified"] is not True:
-        errors.append("fulfilled requires route.route_verified == true")
+        add("fulfilled requires route.route_verified == true")
     if route["mutation_source_verified"] is not True:
-        errors.append("fulfilled requires route.mutation_source_verified == true")
+        add("fulfilled requires route.mutation_source_verified == true")
     if scope["forbidden_files_changed"]:
-        errors.append(
-            "fulfilled requires scope.forbidden_files_changed to be empty — found "
-            + ", ".join(scope["forbidden_files_changed"])
-        )
+        add("fulfilled requires scope.forbidden_files_changed to be empty — found "
+            + ", ".join(scope["forbidden_files_changed"]))
     if not criteria:
-        errors.append("fulfilled requires at least one acceptance criterion")
+        add("fulfilled requires at least one acceptance criterion")
     not_pass = [c["id"] for c in criteria if c["status"] != "pass"]
     if not_pass:
-        errors.append(
-            "fulfilled requires every acceptance criterion to be pass — not pass: "
-            + ", ".join(not_pass)
-        )
+        add("fulfilled requires every acceptance criterion to be pass — not pass: "
+            + ", ".join(not_pass))
     unevidenced = [c["id"] for c in criteria if c["status"] == "pass" and not c["evidence"]]
     if unevidenced:
-        errors.append(
-            "fulfilled requires every acceptance criterion to carry an evidence "
-            "reference — without one: " + ", ".join(unevidenced)
-        )
+        add("fulfilled requires every acceptance criterion to carry an evidence reference"
+            " — without one: " + ", ".join(unevidenced))
     if verification["diff_inspected"] is not True:
-        errors.append("fulfilled requires verification.diff_inspected == true")
+        add("fulfilled requires verification.diff_inspected == true")
     if verification["repo_status_inspected"] is not True:
-        errors.append("fulfilled requires verification.repo_status_inspected == true")
+        add("fulfilled requires verification.repo_status_inspected == true")
     if verification["secret_or_external_action_issue"] is not False:
-        errors.append("fulfilled requires verification.secret_or_external_action_issue == false")
+        add("fulfilled requires verification.secret_or_external_action_issue == false")
     if verification["tests_blocked"]:
-        errors.append(
-            "fulfilled requires verification.tests_blocked to be empty — found "
-            + ", ".join(verification["tests_blocked"])
-        )
+        add("fulfilled requires verification.tests_blocked to be empty — found "
+            + ", ".join(verification["tests_blocked"]))
+    # A command that never ran belongs in a blocked, partial, or failed envelope,
+    # where it carries blocker context. It is never part of a completion claim.
     unrun = [c["command"] for c in commands if c.get("not_run") is True]
     if unrun:
-        errors.append(
-            "fulfilled forbids a not_run command record — a command that did not run "
-            "belongs in a blocked, partial, or failed envelope: " + ", ".join(unrun)
-        )
+        add("fulfilled forbids a not_run command record — a command that did not run "
+            "belongs in a blocked, partial, or failed envelope: " + ", ".join(unrun))
     return errors
 
 
