@@ -1,0 +1,53 @@
+{
+  "executor_evidence": {
+    "schema_version": "1",
+    "adapter": {
+      "name": "example-adapter",
+      "version": "example-version"
+    },
+    "work_unit_id": "example-unit",
+    "status": "fulfilled",
+    "route": {
+      "executor_id": "example-executor",
+      "invocation_id": "example-invocation",
+      "route_verified": true,
+      "mutation_source_verified": true
+    },
+    "scope": {
+      "changed_files": [
+        "README.md"
+      ],
+      "forbidden_files_changed": [],
+      "dirty_worktree_preserved": "not_applicable"
+    },
+    "acceptance": {
+      "criteria": [
+        {
+          "id": "AC-001",
+          "status": "pass",
+          "evidence": [
+            "artifact:test-log"
+          ]
+        }
+      ]
+    },
+    "verification": {
+      "commands_run": [
+        {
+          "command": "scripts/conformance.sh",
+          "exit_code": 0,
+          "evidence_reference": "artifact:test-log"
+        }
+      ],
+      "tests_passed": [
+        "scripts/conformance.sh"
+      ],
+      "tests_blocked": [],
+      "diff_inspected": false,
+      "repo_status_inspected": true,
+      "secret_or_external_action_issue": false
+    },
+    "blockers": [],
+    "assumptions": []
+  }
+}

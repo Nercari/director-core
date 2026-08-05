@@ -32,6 +32,11 @@ director-core-*/
 # it changes hook behaviour for every later clone and session.
 .director/active-worktree
 
+# Site-specific sanitizer patterns, read by scripts/check-example-sanitization.sh
+# when present. Untracked on purpose: a committed denylist of real aliases,
+# accounts, and hostnames would publish the topology it exists to protect.
+.sanitizer-denylist.local
+
 # OS noise
 Thumbs.db
 desktop.ini
