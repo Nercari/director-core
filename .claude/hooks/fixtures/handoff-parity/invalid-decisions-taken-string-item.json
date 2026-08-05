@@ -1,0 +1,20 @@
+{
+  "published_at": "2026-07-29T00:00:00Z",
+  "run_id": "parity-minimal",
+  "capacity_state": "C",
+  "objective": "exercise the parity corpus",
+  "repository_state": {
+    "main_commit": "0123456",
+    "open_branches": [],
+    "open_pull_requests": []
+  },
+  "decisions_taken": [
+    "I decided to promote it"
+  ],
+  "next_action": "stop",
+  "layer2": {
+    "executor_vendor": "openai",
+    "reviewer_vendor": "anthropic",
+    "self_review": false
+  }
+}
