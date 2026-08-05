@@ -174,7 +174,14 @@ classify() {
 # Classified once, into a file, then printed and tallied from that. A pipeline
 # would put the loop in a subshell and lose the tallies, and re-running the
 # classifier for the tally would let the report and the status disagree.
-verdicts=$(mktemp)
+if ! verdicts=$(mktemp 2>/dev/null) || [ -z "$verdicts" ]; then
+    # A missing or failing mktemp is an environment this script cannot run in.
+    # Said plainly and exited 3, because the alternative — dying mid-report with
+    # a bare shell error and no Status line — reads like a classification.
+    printf 'branch-state: mktemp is unavailable or failed; cannot classify paths\n' >&2
+    printf 'Status: UNUSABLE_ENVIRONMENT — mktemp is required and unavailable; nothing was classified\n'
+    exit 3
+fi
 trap 'rm -f "$verdicts"' EXIT INT TERM
 printf '%s\n' "$claimed" | while IFS= read -r path; do
     [ -n "$path" ] || continue

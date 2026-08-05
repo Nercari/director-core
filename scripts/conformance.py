@@ -1662,6 +1662,50 @@ def scenario_branch_state_closed_pr_does_not_block() -> tuple[bool, str]:
     return outcome, f"a merged pull request reports content as context only: {reason}"
 
 
+def scenario_branch_state_unusable_environment_is_named() -> tuple[bool, str]:
+    """A missing prerequisite must be said, not died on halfway through a report.
+
+    The classifier needs mktemp. Without the guard it exited 127 with a bare
+    shell error after printing a partial table, which a caller reading exit
+    codes could not distinguish from a classification.
+    """
+    if BRANCH_STATE.is_file() is False:
+        return False, f"missing classifier: {BRANCH_STATE}"
+    try:
+        with tempfile.TemporaryDirectory(prefix="director-branch-state-") as temporary:
+            root = Path(temporary) / "fixture-repository"
+            root.mkdir(parents=True)
+            build_branch_state_repository(
+                root, {"file.txt": "line1\nline2\n"}, {"file.txt": "line1\nline2\n"}
+            )
+            # A failing mktemp rather than a stripped PATH: the point is the
+            # prerequisite, and rebuilding a minimal PATH would test the fixture.
+            shim = Path(temporary) / "bin"
+            shim.mkdir()
+            write_text(shim / "mktemp", "#!/usr/bin/env bash\nexit 1\n")
+            (shim / "mktemp").chmod(0o755)
+            env = os.environ.copy()
+            env["PATH"] = f"{shim}{os.pathsep}{env['PATH']}"
+            completed = subprocess.run(
+                [BASH, str(BRANCH_STATE), "--repo", str(root), "--base", "main",
+                 "--head", "pr-head"],
+                cwd=str(ROOT),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=45,
+                check=False,
+                env=env,
+            )
+    except Exception as error:
+        return False, f"case could not be built or exercised: {error}"
+    if completed.returncode != 3:
+        return False, f"expected exit 3, got {completed.returncode}: {completed.stdout.strip()}"
+    if "UNUSABLE_ENVIRONMENT" not in completed.stdout or "mktemp" not in completed.stdout:
+        return False, f"the missing prerequisite was not named: {completed.stdout.strip()}"
+    return True, "an unavailable mktemp is named and exits 3, not a partial report"
+
+
 def run_preflight_supersession(head_files: dict, main_files: dict, head: str) -> Command:
     """Drive scripts/preflight.sh over a synthetic superseded repository."""
     if BASH is None:
@@ -2152,6 +2196,7 @@ def main() -> int:
         scenario_branch_state_mixed_blocks_and_reports_both(),
         scenario_branch_state_three_dot_is_demoted(),
         scenario_branch_state_closed_pr_does_not_block(),
+        scenario_branch_state_unusable_environment_is_named(),
         scenario_preflight_does_not_block_superseded_content(),
         scenario_preflight_still_blocks_unlanded_content(),
         scenario_example_sanitizer_accepts_public_examples(),
