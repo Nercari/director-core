@@ -16,7 +16,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4   # pin by SHA once the digest is known
+      - uses: actions/checkout@v7   # pin by SHA once the digest is known
         with:
           persist-credentials: false   # see conformance scenario 5 below
 
