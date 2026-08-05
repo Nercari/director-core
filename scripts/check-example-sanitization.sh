@@ -109,7 +109,17 @@ def local_patterns():
 
 def targets():
     if arguments:
-        return [Path(argument) for argument in arguments]
+        # A directory argument scans the tree under it. Without this, naming a
+        # directory read as a file and exited 2, so "scan this examples tree"
+        # looked like a broken checker rather than a clean scan.
+        selected = []
+        for argument in arguments:
+            path = Path(argument)
+            if path.is_dir():
+                selected += sorted(child for child in path.rglob("*") if child.is_file())
+            else:
+                selected.append(path)
+        return selected
     if not DEFAULT_SCAN.is_dir():
         print(f"cannot scan {DEFAULT_SCAN}: no such directory", file=sys.stderr)
         raise SystemExit(2)

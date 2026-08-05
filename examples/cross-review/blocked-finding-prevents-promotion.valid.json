@@ -1,0 +1,76 @@
+{
+  "cross_review": {
+    "schema_version": "1",
+    "work_unit_id": "example-unit",
+    "subject": {
+      "packet_ref": "artifact:packet",
+      "result_ref": "artifact:result",
+      "executor_evidence_ref": "artifact:executor-evidence",
+      "diff_ref": "artifact:diff",
+      "repo_status_ref": "artifact:repo-status"
+    },
+    "executor": {
+      "tool": "codex",
+      "adapter": "moonrail-example",
+      "provider": "openai",
+      "invocation_id": "example-exec-invocation",
+      "mutation_authority": true,
+      "changed_files": [
+        "README.md"
+      ]
+    },
+    "adapter_internal_verification": {
+      "present": false,
+      "verifier": null,
+      "counts_as_independent_layer2": false,
+      "evidence_ref": null
+    },
+    "reviews": [
+      {
+        "review_id": "review-001",
+        "role": "adversarial",
+        "reviewer": {
+          "tool": "claude",
+          "provider": "anthropic",
+          "invocation_id": "example-review-invocation"
+        },
+        "read_only": true,
+        "mutation_authority": false,
+        "changed_files": [],
+        "self_review_declared": false,
+        "same_tool_as_executor": false,
+        "same_provider_as_executor": false,
+        "same_invocation_as_executor": false,
+        "verdict": "blocked",
+        "findings": [
+          {
+            "finding_id": "finding-001",
+            "severity": "blocker",
+            "summary": "Required evidence is missing.",
+            "evidence_ref": "artifact:review-finding"
+          }
+        ]
+      }
+    ],
+    "layer2": {
+      "independent_review_satisfied": false,
+      "independent_review_id": null,
+      "auxiliary_review_ids": [],
+      "auto_promotion_allowed_by_this_record": false,
+      "reason": "The adversarial review returned blocked and carries a blocker finding, so independent Layer 2 cannot be claimed."
+    },
+    "behavior_check": {
+      "required": true,
+      "completed": false,
+      "evidence_ref": null
+    },
+    "promotion": {
+      "blocked_by_this_record": true,
+      "authorized_by_this_record": false,
+      "blocking_review_ids": [
+        "review-001"
+      ],
+      "reason": "A blocker finding was recorded. Promotion is blocked by this record."
+    }
+  }
+}

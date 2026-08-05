@@ -36,6 +36,10 @@ RESTRICTED_ACCOUNT_CLEAN_BOOTSTRAP = ROOT / "scripts" / "clean-restricted-accoun
 EXECUTOR_EVIDENCE_VALIDATOR = ROOT / "scripts" / "validate-executor-evidence.sh"
 EXAMPLE_SANITIZER = ROOT / "scripts" / "check-example-sanitization.sh"
 EXECUTOR_EVIDENCE_EXAMPLES = ROOT / "examples" / "executor-evidence"
+EXECUTOR_EVIDENCE_SCHEMA = ROOT / "schemas" / "executor-evidence.schema.json"
+CROSS_REVIEW_VALIDATOR = ROOT / "scripts" / "validate-cross-review.sh"
+CROSS_REVIEW_EXAMPLES = ROOT / "examples" / "cross-review"
+CROSS_REVIEW_SCHEMA = ROOT / "schemas" / "cross-review.schema.json"
 SANITIZER_NEGATIVE_TEMPLATE = (
     ROOT / "tests" / "sanitizer" / "executor-evidence" / "leak-case.generated.invalid.yaml.tmpl"
 )
@@ -74,6 +78,82 @@ EXECUTOR_EVIDENCE_REJECT_CASES = (
     ),
     ("reject-tests-blocked", "fulfilled requires verification.tests_blocked to be empty"),
     ("reject-narrative-evidence", "evidence reference does not match"),
+)
+
+# The cross-review fixture set is canonical in the same way: every fixture is
+# registered here by name, conformance uses explicit registration rather than
+# discovery, and a scenario asserts the directory still matches these tables.
+CROSS_REVIEW_VALID_CASES = (
+    "cross-executor-review-distinct-provider",
+    "cross-reviewer-executor-swapped",
+    "same-provider-auxiliary-only",
+    "adapter-internal-verification-auxiliary",
+    "blocked-finding-prevents-promotion",
+    "missing-behavior-check-not-promotion",
+    "role-separated-pattern",
+)
+
+CROSS_REVIEW_REJECT_CASES = (
+    ("self-review-independent", "forbids a reviewer that declares a self-review"),
+    ("same-invocation-independent", "shares the executor's invocation"),
+    ("same-provider-independent", "shares the executor's provider"),
+    ("same-tool-independent", "shares the executor's tool"),
+    ("reviewer-mutated-code", "holds mutation authority"),
+    ("reviewer-not-read-only", "is not read_only"),
+    (
+        "adapter-internal-independent",
+        "adapter_internal_verification.counts_as_independent_layer2 must always be",
+    ),
+    (
+        "blocker-with-promotion-unblocked",
+        "requires promotion.blocked_by_this_record == true",
+    ),
+    # No resolution machinery exists in this version, so a finding claiming
+    # resolution is rejected as an unrecognised field rather than interpreted.
+    ("resolved-blocker-with-promotion-unblocked", "unexpected field 'status'"),
+    (
+        "auxiliary-blocker-with-independence-claimed",
+        "requires layer2.independent_review_satisfied == false",
+    ),
+    (
+        "verdict-blocked-with-layer2-satisfied",
+        "requires layer2.independent_review_satisfied == false",
+    ),
+    (
+        "auto-promotion-true",
+        "layer2.auto_promotion_allowed_by_this_record must always be false",
+    ),
+    (
+        "promotion-authorized-true",
+        "promotion.authorized_by_this_record must always be false",
+    ),
+    ("missing-executor-evidence-ref", "missing required field 'executor_evidence_ref'"),
+    (
+        "malformed-executor-evidence-ref",
+        "evidence reference does not match the required format",
+    ),
+    (
+        "contradictory-identity-flags",
+        "declares same_provider_as_executor false, but the recorded providers are identical",
+    ),
+    ("tool-other-claimed-independent", "cannot be claimed when either side records tool: other"),
+    (
+        "provider-other-claimed-independent",
+        "cannot be claimed when either side records provider: other",
+    ),
+    (
+        "multiple-auxiliary-claim-independent",
+        "multiple auxiliary reviews never aggregate into an independent one",
+    ),
+    ("missing-independent-review-id", "missing required field 'independent_review_id'"),
+    ("independent-id-nonexistent-review", "names no review in reviews[]"),
+    ("independent-id-listed-auxiliary", "also appears in auxiliary_review_ids"),
+    ("duplicate-review-ids", "duplicate review_id 'review-001'"),
+    (
+        "independent-satisfied-false-with-nonnull-id",
+        "requires independent_review_id to be null",
+    ),
+    ("reviewer-identity-missing", "missing required field 'provider'"),
 )
 
 
@@ -1506,6 +1586,140 @@ def scenario_executor_evidence_fixture_set_is_canonical() -> tuple[bool, str]:
     return True, f"{len(expected_valid)} valid and {len(expected_invalid)} invalid fixtures, names as specified"
 
 
+def run_cross_review_validator(document: Path) -> Command:
+    """Run the cross-review validator over one document, as an adapter would."""
+    if BASH is None:
+        raise RuntimeError("bash is required to execute scripts/validate-cross-review.sh")
+    return run([BASH, str(CROSS_REVIEW_VALIDATOR), str(document)], ROOT)
+
+
+def cross_review_fixture(stem: str, kind: str) -> Path:
+    return CROSS_REVIEW_EXAMPLES / f"{stem}.{kind}.json"
+
+
+def scenario_cross_review_accepts(stem: str) -> tuple[bool, str]:
+    fixture = cross_review_fixture(stem, "valid")
+    if not fixture.is_file():
+        return False, f"missing valid fixture: {fixture.name}"
+    try:
+        result = run_cross_review_validator(fixture)
+    except Exception as error:
+        return False, f"{fixture.name}: validator could not be run: {error}"
+    if result.returncode != 0:
+        return False, f"{fixture.name}: validator exited {result.returncode}, expected 0: {result.output.strip()}"
+    return True, f"{fixture.name} accepted"
+
+
+def scenario_cross_review_rejects(stem: str, expected_reason: str) -> tuple[bool, str]:
+    fixture = cross_review_fixture(stem, "invalid")
+    if not fixture.is_file():
+        return False, f"missing invalid fixture: {fixture.name}"
+    try:
+        result = run_cross_review_validator(fixture)
+    except Exception as error:
+        return False, f"{fixture.name}: validator could not be run: {error}"
+    if result.returncode != 1:
+        return False, f"{fixture.name}: validator exited {result.returncode}, expected 1: {result.output.strip()}"
+    if expected_reason not in result.output:
+        return (
+            False,
+            f"{fixture.name}: validator omitted expected reason {expected_reason!r}: {result.output.strip()}",
+        )
+    return True, f"{fixture.name} rejected: {expected_reason}"
+
+
+def scenario_cross_review_fixture_set_is_canonical() -> tuple[bool, str]:
+    if not CROSS_REVIEW_EXAMPLES.is_dir():
+        return False, f"missing fixture directory: {CROSS_REVIEW_EXAMPLES}"
+    expected_valid = {f"{stem}.valid.json" for stem in CROSS_REVIEW_VALID_CASES}
+    expected_invalid = {f"{stem}.invalid.json" for stem, _ in CROSS_REVIEW_REJECT_CASES}
+    expected = expected_valid | expected_invalid
+    present = {path.name for path in CROSS_REVIEW_EXAMPLES.iterdir() if path.is_file()}
+    missing = sorted(expected - present)
+    unexpected = sorted(present - expected)
+    if missing:
+        return False, "cross-review fixtures missing from the canonical set: " + ", ".join(missing)
+    if unexpected:
+        return False, "cross-review fixtures outside the canonical set: " + ", ".join(unexpected)
+    return True, (
+        f"{len(expected_valid)} valid and {len(expected_invalid)} invalid cross-review "
+        f"fixtures, each registered by name"
+    )
+
+
+def scenario_cross_review_reference_format_matches_executor_evidence() -> tuple[bool, str]:
+    """One evidence-reference format across contracts, asserted rather than assumed.
+
+    subject.executor_evidence_ref is validated against the same pattern the
+    executor-evidence contract already uses. Restating the pattern in a second
+    schema is only safe if something fails when the two drift.
+    """
+    for path in (CROSS_REVIEW_SCHEMA, EXECUTOR_EVIDENCE_SCHEMA):
+        if not path.is_file():
+            return False, f"missing schema: {path}"
+    try:
+        cross = json.loads(CROSS_REVIEW_SCHEMA.read_text(encoding="utf-8"))
+        evidence = json.loads(EXECUTOR_EVIDENCE_SCHEMA.read_text(encoding="utf-8"))
+        cross_pattern = cross["$defs"]["evidence_reference"]["pattern"]
+        evidence_pattern = evidence["$defs"]["evidence_reference"]["pattern"]
+    except Exception as error:
+        return False, f"could not read both evidence-reference patterns: {error}"
+    if cross_pattern != evidence_pattern:
+        return False, (
+            f"evidence-reference patterns have drifted: cross-review {cross_pattern!r} "
+            f"vs executor-evidence {evidence_pattern!r}"
+        )
+    return True, "cross-review reuses the executor-evidence reference format"
+
+
+def scenario_cross_review_does_not_dereference_subject() -> tuple[bool, str]:
+    """Subject references are validated as strings and never followed.
+
+    The ledger is composed from material supplied by the parties under review. A
+    validator that opened, fetched, or executed what those references point at
+    would be an execution surface rather than a check, so the rule is asserted
+    with a reference whose target would be observable if it were ever touched.
+    """
+    source = cross_review_fixture("cross-executor-review-distinct-provider", "valid")
+    if not source.is_file():
+        return False, f"missing valid fixture: {source.name}"
+    try:
+        with tempfile.TemporaryDirectory(prefix="director-cross-review-") as temporary:
+            sentinel = Path(temporary) / "dereferenced"
+            write_text(sentinel, "the validator opened a subject reference\n")
+            document = json.loads(source.read_text(encoding="utf-8"))
+            # A well-formed reference pointing at a file that exists. Validation
+            # must neither read it nor care whether it is there.
+            document["cross_review"]["subject"]["diff_ref"] = "file:dereferenced"
+            candidate = Path(temporary) / "dereference-attempt.json"
+            write_text(candidate, json.dumps(document, indent=2) + "\n")
+            result = run_cross_review_validator(candidate)
+            if sentinel.read_text(encoding="utf-8").strip().endswith("reference"):
+                sentinel.unlink()
+    except Exception as error:
+        return False, f"scenario could not be built or exercised: {error}"
+    if result.returncode != 0:
+        return False, f"validator exited {result.returncode}, expected 0: {result.output.strip()}"
+    if "dereferenced" in result.output and "diff_ref" not in result.output:
+        return False, f"validator reported the reference target: {result.output.strip()}"
+    return True, "subject references are validated as strings, never dereferenced"
+
+
+def scenario_cross_review_examples_are_sanitized() -> tuple[bool, str]:
+    """The sanitizer's default scan covers executor-evidence, so name the tree."""
+    if BASH is None:
+        return False, "bash is required to execute scripts/check-example-sanitization.sh"
+    if not CROSS_REVIEW_EXAMPLES.is_dir():
+        return False, f"missing fixture directory: {CROSS_REVIEW_EXAMPLES}"
+    try:
+        result = run([BASH, str(EXAMPLE_SANITIZER), str(CROSS_REVIEW_EXAMPLES)], ROOT)
+    except Exception as error:
+        return False, f"sanitizer could not be run: {error}"
+    if result.returncode != 0:
+        return False, f"sanitizer rejected the cross-review examples: {result.output.strip()}"
+    return True, "cross-review examples carry no credential, absolute path, or private hostname"
+
+
 def scenario_example_sanitizer_accepts_public_examples() -> tuple[bool, str]:
     if BASH is None:
         return False, "bash is required to execute scripts/check-example-sanitization.sh"
@@ -1620,6 +1834,15 @@ def main() -> int:
         scenario_executor_evidence_fulfilled_forbids_not_run(),
         scenario_executor_evidence_does_not_replay_commands(),
         scenario_executor_evidence_fixture_set_is_canonical(),
+        *(scenario_cross_review_accepts(stem) for stem in CROSS_REVIEW_VALID_CASES),
+        *(
+            scenario_cross_review_rejects(stem, reason)
+            for stem, reason in CROSS_REVIEW_REJECT_CASES
+        ),
+        scenario_cross_review_fixture_set_is_canonical(),
+        scenario_cross_review_reference_format_matches_executor_evidence(),
+        scenario_cross_review_does_not_dereference_subject(),
+        scenario_cross_review_examples_are_sanitized(),
         scenario_example_sanitizer_accepts_public_examples(),
         scenario_example_sanitizer_rejects_generated_leak(),
     )
