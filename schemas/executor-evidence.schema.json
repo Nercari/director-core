@@ -1,0 +1,200 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Nercari/director-core/schemas/executor-evidence.schema.json",
+  "title": "Executor evidence envelope",
+  "description": "Adapter-neutral evidence an executor adapter submits about one work unit. Records what was done and what it can point at; grants no authority to commit, push, open a pull request, or promote anything.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["executor_evidence"],
+  "properties": {
+    "executor_evidence": { "$ref": "#/$defs/envelope" }
+  },
+  "$defs": {
+    "non_empty_string": {
+      "type": "string",
+      "minLength": 1
+    },
+    "evidence_reference": {
+      "description": "A structured pointer to retained evidence. Enforced by positive format, so an unstructured summary fails for a structural reason rather than by matching a list of phrases.",
+      "type": "string",
+      "pattern": "^(artifact|file|commit|run):[A-Za-z0-9._/-]+$"
+    },
+    "blocker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "detail"],
+      "properties": {
+        "id": { "$ref": "#/$defs/non_empty_string" },
+        "detail": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+    "criterion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "evidence"],
+      "properties": {
+        "id": { "$ref": "#/$defs/non_empty_string" },
+        "status": {
+          "description": "String enum. Never a boolean.",
+          "enum": ["pass", "fail", "blocked"]
+        },
+        "evidence": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/evidence_reference" }
+        }
+      }
+    },
+    "command_ran": {
+      "description": "A command that actually ran. An exit code is required because there is one.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "exit_code", "evidence_reference"],
+      "properties": {
+        "command": { "$ref": "#/$defs/non_empty_string" },
+        "exit_code": { "type": "integer" },
+        "evidence_reference": { "$ref": "#/$defs/evidence_reference" },
+        "not_run": { "const": false }
+      }
+    },
+    "command_not_run": {
+      "description": "A command that did not run. No exit code exists, so none is required or permitted; the record carries a blocker or an evidence reference instead.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "not_run"],
+      "properties": {
+        "command": { "$ref": "#/$defs/non_empty_string" },
+        "not_run": { "const": true },
+        "blocker_id": { "$ref": "#/$defs/non_empty_string" },
+        "evidence_reference": { "$ref": "#/$defs/evidence_reference" }
+      },
+      "anyOf": [
+        { "required": ["blocker_id"] },
+        { "required": ["evidence_reference"] }
+      ]
+    },
+    "command_record": {
+      "oneOf": [
+        { "$ref": "#/$defs/command_ran" },
+        { "$ref": "#/$defs/command_not_run" }
+      ]
+    },
+    "envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "adapter",
+        "work_unit_id",
+        "status",
+        "route",
+        "scope",
+        "acceptance",
+        "verification",
+        "blockers",
+        "assumptions"
+      ],
+      "properties": {
+        "schema_version": { "$ref": "#/$defs/non_empty_string" },
+        "adapter": {
+          "description": "Which adapter produced this envelope. A named adapter is an example, never a Director Core dependency.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "version"],
+          "properties": {
+            "name": { "$ref": "#/$defs/non_empty_string" },
+            "version": { "$ref": "#/$defs/non_empty_string" }
+          }
+        },
+        "work_unit_id": { "$ref": "#/$defs/non_empty_string" },
+        "status": {
+          "description": "String enum. Never a boolean.",
+          "enum": ["fulfilled", "partial", "blocked", "failed"]
+        },
+        "route": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "executor_id",
+            "invocation_id",
+            "route_verified",
+            "mutation_source_verified"
+          ],
+          "properties": {
+            "executor_id": { "$ref": "#/$defs/non_empty_string" },
+            "invocation_id": { "$ref": "#/$defs/non_empty_string" },
+            "route_verified": { "type": "boolean" },
+            "mutation_source_verified": { "type": "boolean" }
+          }
+        },
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["changed_files", "forbidden_files_changed", "dirty_worktree_preserved"],
+          "properties": {
+            "changed_files": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/non_empty_string" }
+            },
+            "forbidden_files_changed": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/non_empty_string" }
+            },
+            "dirty_worktree_preserved": {
+              "description": "String enum. Never a boolean.",
+              "enum": ["preserved", "not_preserved", "not_applicable"]
+            }
+          }
+        },
+        "acceptance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["criteria"],
+          "properties": {
+            "criteria": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/criterion" }
+            }
+          }
+        },
+        "verification": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "commands_run",
+            "tests_passed",
+            "tests_blocked",
+            "diff_inspected",
+            "repo_status_inspected",
+            "secret_or_external_action_issue"
+          ],
+          "properties": {
+            "commands_run": {
+              "description": "Evidence records. Never replayed by any validator.",
+              "type": "array",
+              "items": { "$ref": "#/$defs/command_record" }
+            },
+            "tests_passed": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/non_empty_string" }
+            },
+            "tests_blocked": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/non_empty_string" }
+            },
+            "diff_inspected": { "type": "boolean" },
+            "repo_status_inspected": { "type": "boolean" },
+            "secret_or_external_action_issue": { "type": "boolean" }
+          }
+        },
+        "blockers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/blocker" }
+        },
+        "assumptions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/non_empty_string" }
+        }
+      }
+    }
+  }
+}

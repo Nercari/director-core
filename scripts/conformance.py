@@ -33,6 +33,48 @@ RESTRICTED_ACCOUNT_LAUNCHER = ROOT / "scripts" / "exec-as-account.ps1"
 RESTRICTED_ACCOUNT_WRAPPER = ROOT / "scripts" / "run-restricted-account-probe.ps1"
 RESTRICTED_ACCOUNT_LOGIN_RUNNER = ROOT / "scripts" / "login-and-run-restricted-probe.ps1"
 RESTRICTED_ACCOUNT_CLEAN_BOOTSTRAP = ROOT / "scripts" / "clean-restricted-account-probe.ps1"
+EXECUTOR_EVIDENCE_VALIDATOR = ROOT / "scripts" / "validate-executor-evidence.sh"
+EXAMPLE_SANITIZER = ROOT / "scripts" / "check-example-sanitization.sh"
+EXECUTOR_EVIDENCE_EXAMPLES = ROOT / "examples" / "executor-evidence"
+SANITIZER_NEGATIVE_TEMPLATE = (
+    ROOT / "tests" / "sanitizer" / "executor-evidence" / "leak-case.generated.invalid.yaml.tmpl"
+)
+
+# The fixture set is canonical: one invalid fixture per rejection rule, four valid
+# envelopes. A scenario asserts the set on disk still matches these tables, so a
+# fixture cannot be deleted or renamed without a conformance failure naming it.
+EXECUTOR_EVIDENCE_VALID_CASES = (
+    "fulfilled",
+    "blocked",
+    "partial-blocked-test",
+    "failed-command",
+)
+
+EXECUTOR_EVIDENCE_REJECT_CASES = (
+    ("reject-route-unverified", "fulfilled requires route.route_verified == true"),
+    (
+        "reject-mutation-source-unverified",
+        "fulfilled requires route.mutation_source_verified == true",
+    ),
+    ("reject-blocked-criterion", "fulfilled requires every acceptance criterion to be pass"),
+    ("reject-failed-criterion", "fulfilled requires every acceptance criterion to be pass"),
+    (
+        "reject-criterion-missing-evidence",
+        "fulfilled requires every acceptance criterion to carry an evidence reference",
+    ),
+    ("reject-forbidden-files", "fulfilled requires scope.forbidden_files_changed to be empty"),
+    ("reject-diff-not-inspected", "fulfilled requires verification.diff_inspected == true"),
+    (
+        "reject-repo-status-not-inspected",
+        "fulfilled requires verification.repo_status_inspected == true",
+    ),
+    (
+        "reject-secret-or-external-action",
+        "fulfilled requires verification.secret_or_external_action_issue == false",
+    ),
+    ("reject-tests-blocked", "fulfilled requires verification.tests_blocked to be empty"),
+    ("reject-narrative-evidence", "evidence reference does not match"),
+)
 
 
 @dataclass
@@ -1327,6 +1369,200 @@ def scenario_restricted_account_continuation_contract() -> tuple[bool, str]:
     return True, "#59 continuation uses a short tracked bootstrap and identity-safe proof paths"
 
 
+def run_executor_evidence_validator(document: Path) -> Command:
+    """Run the executor-evidence validator over one document.
+
+    The validator is invoked as a real entry point rather than imported, for the
+    same reason the result-validator scenarios copy and run the shell script: the
+    thing under test is what an adapter would actually call.
+    """
+    if BASH is None:
+        raise RuntimeError("bash is required to execute scripts/validate-executor-evidence.sh")
+    return run([BASH, str(EXECUTOR_EVIDENCE_VALIDATOR), str(document)], ROOT)
+
+
+def executor_evidence_fixture(stem: str, kind: str) -> Path:
+    return EXECUTOR_EVIDENCE_EXAMPLES / f"{stem}.{kind}.json"
+
+
+def scenario_executor_evidence_accepts(stem: str) -> tuple[bool, str]:
+    fixture = executor_evidence_fixture(stem, "valid")
+    if not fixture.is_file():
+        return False, f"missing valid fixture: {fixture.name}"
+    try:
+        result = run_executor_evidence_validator(fixture)
+    except Exception as error:
+        return False, f"{fixture.name}: validator could not be run: {error}"
+    if result.returncode != 0:
+        return False, f"{fixture.name}: validator exited {result.returncode}, expected 0: {result.output.strip()}"
+    return True, f"{fixture.name} accepted"
+
+
+def scenario_executor_evidence_rejects(stem: str, expected_reason: str) -> tuple[bool, str]:
+    fixture = executor_evidence_fixture(stem, "invalid")
+    if not fixture.is_file():
+        return False, f"missing invalid fixture: {fixture.name}"
+    try:
+        result = run_executor_evidence_validator(fixture)
+    except Exception as error:
+        return False, f"{fixture.name}: validator could not be run: {error}"
+    if result.returncode != 1:
+        return False, f"{fixture.name}: validator exited {result.returncode}, expected 1: {result.output.strip()}"
+    if expected_reason not in result.output:
+        return (
+            False,
+            f"{fixture.name}: validator omitted expected reason {expected_reason!r}: {result.output.strip()}",
+        )
+    return True, f"{fixture.name} rejected: {expected_reason}"
+
+
+def scenario_executor_evidence_fulfilled_forbids_not_run() -> tuple[bool, str]:
+    """A fulfilled envelope may not carry a command that never ran.
+
+    Synthesized rather than committed: the rule is about a combination, and a
+    sixteenth near-identical fixture would buy nothing a temporary file does not.
+    """
+    source = executor_evidence_fixture("fulfilled", "valid")
+    if not source.is_file():
+        return False, f"missing valid fixture: {source.name}"
+    try:
+        document = json.loads(source.read_text(encoding="utf-8"))
+        evidence = document["executor_evidence"]
+        evidence["blockers"] = [{"id": "BLK-001", "detail": "synthesized for this scenario"}]
+        evidence["verification"]["commands_run"].append(
+            {"command": "scripts/integration.sh", "not_run": True, "blocker_id": "BLK-001"}
+        )
+        with tempfile.TemporaryDirectory(prefix="director-executor-evidence-") as temporary:
+            candidate = Path(temporary) / "fulfilled-with-not-run.json"
+            write_text(candidate, json.dumps(document, indent=2) + "\n")
+            result = run_executor_evidence_validator(candidate)
+    except Exception as error:
+        return False, f"scenario could not be built or exercised: {error}"
+    expected = "fulfilled forbids a not_run command record"
+    if result.returncode != 1:
+        return False, f"validator exited {result.returncode}, expected 1: {result.output.strip()}"
+    if expected not in result.output:
+        return False, f"validator omitted expected reason {expected!r}: {result.output.strip()}"
+    return True, expected
+
+
+def scenario_executor_evidence_does_not_replay_commands() -> tuple[bool, str]:
+    """Command records are evidence, never a script the validator runs.
+
+    The envelope is composed from material an executor supplies. If validating it
+    executed the strings inside it, the contract would be a remote-execution
+    surface rather than a record.
+    """
+    source = executor_evidence_fixture("fulfilled", "valid")
+    if not source.is_file():
+        return False, f"missing valid fixture: {source.name}"
+    try:
+        with tempfile.TemporaryDirectory(prefix="director-executor-evidence-") as temporary:
+            sentinel = Path(temporary) / "replayed"
+            document = json.loads(source.read_text(encoding="utf-8"))
+            evidence = document["executor_evidence"]
+            # Two shapes of the same attempt: a command that would create the
+            # sentinel directly, and one that tries to reach a second command
+            # through a metacharacter.
+            evidence["verification"]["commands_run"] = [
+                {
+                    "command": f"touch {sentinel}",
+                    "exit_code": 0,
+                    "evidence_reference": "artifact:test-log",
+                },
+                {
+                    "command": f"true; touch {sentinel}",
+                    "exit_code": 0,
+                    "evidence_reference": "artifact:test-log",
+                },
+            ]
+            evidence["verification"]["tests_passed"] = []
+            candidate = Path(temporary) / "replay-attempt.json"
+            write_text(candidate, json.dumps(document, indent=2) + "\n")
+            result = run_executor_evidence_validator(candidate)
+            replayed = sentinel.exists()
+    except Exception as error:
+        return False, f"scenario could not be built or exercised: {error}"
+    if replayed:
+        return False, "the validator executed a command from verification.commands_run"
+    if result.returncode != 0:
+        return False, f"validator exited {result.returncode}, expected 0: {result.output.strip()}"
+    return True, "command records are recorded, not replayed"
+
+
+def scenario_executor_evidence_fixture_set_is_canonical() -> tuple[bool, str]:
+    if not EXECUTOR_EVIDENCE_EXAMPLES.is_dir():
+        return False, f"missing fixture directory: {EXECUTOR_EVIDENCE_EXAMPLES}"
+    expected_valid = {f"{stem}.valid.json" for stem in EXECUTOR_EVIDENCE_VALID_CASES}
+    expected_invalid = {f"{stem}.invalid.json" for stem, _ in EXECUTOR_EVIDENCE_REJECT_CASES}
+    expected = expected_valid | expected_invalid
+    present = {path.name for path in EXECUTOR_EVIDENCE_EXAMPLES.iterdir() if path.is_file()}
+    missing = sorted(expected - present)
+    unexpected = sorted(present - expected)
+    if missing:
+        return False, "fixtures missing from the canonical set: " + ", ".join(missing)
+    if unexpected:
+        return False, "fixtures outside the canonical set: " + ", ".join(unexpected)
+    return True, f"{len(expected_valid)} valid and {len(expected_invalid)} invalid fixtures, names as specified"
+
+
+def scenario_example_sanitizer_accepts_public_examples() -> tuple[bool, str]:
+    if BASH is None:
+        return False, "bash is required to execute scripts/check-example-sanitization.sh"
+    try:
+        result = run([BASH, str(EXAMPLE_SANITIZER)], ROOT)
+    except Exception as error:
+        return False, f"sanitizer could not be run: {error}"
+    if result.returncode != 0:
+        return False, f"sanitizer rejected the committed examples: {result.output.strip()}"
+    return True, "committed examples carry no credential, absolute path, or private hostname"
+
+
+def scenario_example_sanitizer_rejects_generated_leak() -> tuple[bool, str]:
+    """The negative case is synthesized, asserted, and deleted.
+
+    It is never written under examples/: committing a realistic secret to prove a
+    secret scanner works is the failure the scanner exists to prevent.
+    """
+    if BASH is None:
+        return False, "bash is required to execute scripts/check-example-sanitization.sh"
+    if not SANITIZER_NEGATIVE_TEMPLATE.is_file():
+        return False, f"missing sanitizer negative template: {SANITIZER_NEGATIVE_TEMPLATE}"
+    generated: Optional[Path] = None
+    try:
+        template = SANITIZER_NEGATIVE_TEMPLATE.read_text(encoding="utf-8")
+        # Assembled here, from fragments that are inert apart. Neither the
+        # template nor this file contains a complete offending string.
+        substitutions = {
+            "{{ENV_KEY_NAME}}": "EXAMPLE" + "_API" + "_KEY",
+            "{{ABSOLUTE_HOME_PATH}}": "/" + "home/" + "example-user/notes.txt",
+        }
+        body = template
+        for placeholder, replacement in substitutions.items():
+            if placeholder not in body:
+                return False, f"template is missing placeholder {placeholder}"
+            body = body.replace(placeholder, replacement)
+        with tempfile.TemporaryDirectory(prefix="director-sanitizer-negative-") as temporary:
+            generated = Path(temporary) / "leak-case.generated.invalid.json"
+            write_text(generated, body)
+            if EXECUTOR_EVIDENCE_EXAMPLES.resolve() in generated.resolve().parents:
+                return False, "refusing to run: the generated case landed inside the scanned tree"
+            result = run([BASH, str(EXAMPLE_SANITIZER), str(generated)], ROOT)
+            existed = generated.is_file()
+        removed = not generated.exists()
+    except Exception as error:
+        return False, f"scenario could not be built or exercised: {error}"
+    if not existed:
+        return False, "the generated case was not written"
+    if result.returncode == 0:
+        return False, f"sanitizer accepted a document carrying a leak: {result.output.strip()}"
+    if "_API_KEY" not in result.output or "absolute path" not in result.output:
+        return False, f"sanitizer did not name both matched patterns: {result.output.strip()}"
+    if not removed:
+        return False, "the generated case outlived the scenario"
+    return True, "synthesized leak rejected by pattern, then deleted"
+
+
 def report(number: int, passed: Optional[bool], reason: str) -> bool:
     """Print one scenario outcome and report whether it blocks the suite.
 
@@ -1376,6 +1612,16 @@ def main() -> int:
         scenario_restricted_account_probe_self_test(),
         scenario_restricted_account_launcher_prompt_contract(),
         scenario_restricted_account_continuation_contract(),
+        *(scenario_executor_evidence_accepts(stem) for stem in EXECUTOR_EVIDENCE_VALID_CASES),
+        *(
+            scenario_executor_evidence_rejects(stem, reason)
+            for stem, reason in EXECUTOR_EVIDENCE_REJECT_CASES
+        ),
+        scenario_executor_evidence_fulfilled_forbids_not_run(),
+        scenario_executor_evidence_does_not_replay_commands(),
+        scenario_executor_evidence_fixture_set_is_canonical(),
+        scenario_example_sanitizer_accepts_public_examples(),
+        scenario_example_sanitizer_rejects_generated_leak(),
     )
     all_passed = True
     for index, (passed, reason) in enumerate(outcomes, 1):

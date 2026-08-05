@@ -1,0 +1,72 @@
+{
+  "executor_evidence": {
+    "schema_version": "1",
+    "adapter": {
+      "name": "example-adapter",
+      "version": "example-version"
+    },
+    "work_unit_id": "example-unit-partial",
+    "status": "partial",
+    "route": {
+      "executor_id": "example-executor",
+      "invocation_id": "example-invocation",
+      "route_verified": true,
+      "mutation_source_verified": true
+    },
+    "scope": {
+      "changed_files": [
+        "README.md"
+      ],
+      "forbidden_files_changed": [],
+      "dirty_worktree_preserved": "not_applicable"
+    },
+    "acceptance": {
+      "criteria": [
+        {
+          "id": "AC-001",
+          "status": "pass",
+          "evidence": [
+            "artifact:test-log"
+          ]
+        },
+        {
+          "id": "AC-002",
+          "status": "blocked",
+          "evidence": []
+        }
+      ]
+    },
+    "verification": {
+      "commands_run": [
+        {
+          "command": "scripts/conformance.sh",
+          "exit_code": 0,
+          "evidence_reference": "artifact:test-log"
+        },
+        {
+          "command": "scripts/integration.sh",
+          "not_run": true,
+          "blocker_id": "BLK-001"
+        }
+      ],
+      "tests_passed": [
+        "scripts/conformance.sh"
+      ],
+      "tests_blocked": [
+        "scripts/integration.sh"
+      ],
+      "diff_inspected": true,
+      "repo_status_inspected": true,
+      "secret_or_external_action_issue": false
+    },
+    "blockers": [
+      {
+        "id": "BLK-001",
+        "detail": "the integration entry point is absent in this environment"
+      }
+    ],
+    "assumptions": [
+      "the absent entry point is environmental, not a defect in the change"
+    ]
+  }
+}
