@@ -2,10 +2,17 @@
 # PreToolUse on Bash. Exit 2 denies the call. Blueprint §15.1.
 #
 # DECLARED WEAKNESS: this matches on command text, and text can be rewritten.
-# `git -C <dir> push origin main` never contains the string "push origin main"
-# in the position this looks for. These hooks are a barrier against a confused
-# agent, not a determined one. The GitHub ruleset is what actually stops a push
-# to main. Do not add cleverness here expecting it to close that gap.
+# The git rules below match ORDERED, PER-SEGMENT text — git, then the verb, then
+# the protected ref, inside one command segment — rather than unordered
+# substrings anywhere in the line. Ordering is what lets a read-only
+# `git log --grep push main` through while still refusing
+# `bash -c "git push origin main"`, whose payload is just text in one segment.
+# It is still text matching. It is still evadable: a git-level option outside
+# the small allow list below is read as a subcommand and lets a push through,
+# and a nested or escaped quote inside an argument is not modelled. These hooks
+# are a barrier against a confused agent, not a determined one. The GitHub
+# ruleset is what actually stops a push to main. Do not add a shell parser here
+# expecting it to close that gap.
 set -uo pipefail
 
 payload="$(cat)"
@@ -28,16 +35,68 @@ case "$cmd" in
   deny "reset --hard. Use 'git reset --soft HEAD~1' for an unpushed commit (§9.7)." ;;
 esac
 
-case "$cmd" in
-*"push"*"--delete"* | *"push"*":"[a-z]* | *"branch -D"*)
-  deny "branch deletion." ;;
-esac
+# --- git command matching ----------------------------------------------------
+# The unordered globs these replaced denied any line containing "push" and
+# " main" anywhere, in any order. That refused read-only work — `git merge-base`,
+# `git log --grep push main`, and prose in an echo before an unrelated `git log`
+# — while still missing `git push origin refs/heads/main`, quoted refs, and
+# `git -C . merge`. Both directions were measured before this change.
+#
+# sq/dq keep the bracket expressions readable; embedding raw quotes in these
+# strings is what makes this class of pattern unreviewable.
+sq="'"
+dq='"'
 
-# --- pushing to main ---------------------------------------------------------
-# Belt to GitHub's braces. The ruleset is the real barrier.
+# One shell "word": bare characters and quoted spans, concatenated. This is what
+# makes -c core.sshCommand="ssh -i key" one argument rather than two.
+atom="([^[:space:]${sq}${dq}]|${sq}[^${sq}]*${sq}|${dq}[^${dq}]*${dq})"
+arg="${atom}+"
+
+# git-level options permitted BEFORE the subcommand. Deliberately a short list:
+# every addition widens what may sit between "git" and the verb. Anything not
+# here is read as the subcommand, so the rule stops rather than over-reaching.
+opt="(-C[[:space:]]*${arg}|-c[[:space:]]*${arg}"
+opt="${opt}|--git-dir(=|[[:space:]]+)${arg}"
+opt="${opt}|--work-tree(=|[[:space:]]+)${arg}"
+opt="${opt}|--no-pager|--paginate)[[:space:]]+"
+
+# "git" as a command word. The leading class allows a path prefix so
+# /usr/bin/git is covered, while still rejecting "legit" and "-git".
+gverb="(^|[^A-Za-z0-9_-])git[[:space:]]+(${opt})*"
+
+# main as a whole ref token: optionally quoted, optional leading +, optional
+# <src>: refspec source, optional refs/heads/ prefix. The trailing boundary is
+# what keeps a branch called "mainline" out of this.
+ref="[[:space:]][${sq}${dq}]?[+]?([^[:space:]${sq}${dq}]*:)?(refs/heads/)?main[${sq}${dq}]?([[:space:]]|\$)"
+
+re_push_main="${gverb}push([[:space:]]|\$).*${ref}"
+re_delete="${gverb}push([[:space:]]|\$).*([[:space:]](--delete|-d|-D)([[:space:]]|\$)|[[:space:]][${sq}${dq}]?:[A-Za-z0-9_/.-]+)"
+re_merge="${gverb}merge([^A-Za-z0-9_-]|\$)"
+
+# Split on shell separators and let grep do the per-line matching it already
+# does. An earlier version of this used `while read` over the same text and was
+# wrong in the most dangerous possible way: sed does not append a trailing
+# newline, `read` returns non-zero on an unterminated final line, so the loop
+# body never ran and every rule below became dead code. grep has no such edge,
+# and there is no loop left to get wrong.
+git_match() {
+  printf '%s' "$cmd" | sed -E 's/(&&|\|\||;|\|)/\n/g' | grep -qE "$1"
+}
+
+# push-to-main is tested before deletion so a colon refspec to main is named for
+# what it is. The old order reported `git push origin :main` as a branch
+# deletion, which denied correctly and explained wrongly.
+if git_match "$re_push_main"; then
+  deny "push to main. Push task/<unit-id> and open a pull request (§16)."
+fi
+
+if git_match "$re_delete"; then
+  deny "branch deletion."
+fi
+
 case "$cmd" in
-*"push"*" main"* | *"push"*"HEAD:main"* | *"push"*":main"*)
-  deny "push to main. Push task/<unit-id> and open a pull request (§16)." ;;
+*"branch -D"*)
+  deny "branch deletion." ;;
 esac
 
 # --- merging -----------------------------------------------------------------
@@ -48,9 +107,16 @@ case "$cmd" in
   deny "gh pr merge. Only the operator merges (§13.1). Auto-merge is off — '--auto' is denied too." ;;
 esac
 
+# `git merge` uses the same command model as push, so `git -C . merge` is caught
+# — the old adjacent-string glob missed it. The word boundary after "merge" is
+# what lets the read-only merge-base, merge-tree and merge-file through.
+if git_match "$re_merge"; then
+  deny "merging. Only the operator merges."
+fi
+
 case "$cmd" in
-*"git merge"* | *"gh pr review"*"--approve"*)
-  deny "merging or self-approving. Only the operator merges." ;;
+*"gh pr review"*"--approve"*)
+  deny "self-approving. Only the operator merges." ;;
 esac
 
 # --- metered credentials -----------------------------------------------------
