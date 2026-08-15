@@ -685,3 +685,35 @@ its packet claimed, and it says nothing about review, CI, or merge readiness. An
 unfetched ref is reported `unknown`, never "absent" — the failure being closed
 here is precisely the habit of converting "I could not see it" into "it is not
 there".
+
+## 2026-08-15 — two hooks that between them made ending a cycle impossible
+
+`require-handoff.sh` reads the handoff from `$ROOT/.director/current-handoff.json`
+in the MAIN checkout, and enforces only while `.director/active-worktree` exists.
+`block-out-of-scope-write.sh` denies every write outside the active worktree,
+gated on that same file. Both conditions hold in exactly the same state, so
+while a unit was in flight the Stop hook demanded a handoff at a path the write
+guard forbade. The cycle could not end, and could not be made to end.
+
+It bit repeatedly in one session before the shape was recognised, because each
+individual denial reads as a correct refusal. Neither hook is wrong on its own;
+the defect is only visible when you ask which states satisfy both.
+
+**Same class as the issue-59 entry above, and that is the point.** That entry
+records two acceptance criteria an always-on control made unobservable. This is
+that shape again, in the hooks rather than in a probe: a requirement whose
+precondition is the state that makes it unsatisfiable. Two instances now, in
+different subsystems, on the same day.
+
+**Fixed as a hook, not as prose.** `block-out-of-scope-write.sh` exempts
+`$ROOT/.director/current-handoff.*` and nothing else. That file is gitignored
+orchestrator cycle state rather than source, so the guard's actual purpose —
+keeping repository edits inside the worktree — is untouched. The self-test now
+asserts all three edges: the handoff is allowed, another `.director` file in the
+main checkout is still blocked, and a handoff-named file outside `.director` is
+still blocked.
+
+**The workaround used before the fix, recorded so it is not mistaken for
+policy.** The lock was released first and the handoff published afterwards. That
+works, but it publishes the handoff after the unit stops being in flight, which
+is the opposite of what §15.1 wants. It is not a substitute for the fix.
