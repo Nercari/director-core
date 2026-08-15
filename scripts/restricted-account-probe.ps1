@@ -586,26 +586,68 @@ function Invoke-GitCredentialProbe {
     }
 
     $result = Invoke-WithGuardedEnvironment -UnsetProxy {
-        $inputText = "protocol=https`nhost=github.com`n`n"
-        $lines = @()
+        # Stdin is written through ProcessStartInfo, never through a PowerShell
+        # pipeline. Piping a string into a native command is not reliable under
+        # Windows PowerShell 5.1, which is the engine this probe runs on:
+        # whether the bytes arrive depends on the PARENT process's stdin handle,
+        # not on this code. Launched with an inherited pipe the probe refused
+        # correctly; launched with stdin from the null device -- the shape
+        # `powershell.exe -NoProfile -File` gets non-interactively -- git
+        # received nothing and answered "refusing to work with credential
+        # missing protocol field", so a malformed request scored as "no
+        # refusal". A probe whose verdict depends on how its shell was launched
+        # is not evidence.
+        #
+        # ProcessStartInfo.ArgumentList does not exist on .NET Framework, so the
+        # argument string is built by hand. None of these arguments contains a
+        # space or a quote, so plain joining is exact here.
         $exitCode = 1
+        $text = ""
+        $process = $null
+        $requestFile = Join-Path ([IO.Path]::GetTempPath()) ("director-credprobe-" + [guid]::NewGuid().ToString("N") + ".txt")
         try {
-            $lines = @($inputText | & $GitPath "-c" "credential.helper=" "credential" "fill" 2>&1 | ForEach-Object {
-                    Redact-Text ([string]$_)
-                })
-            if ($null -ne $LASTEXITCODE) {
-                $exitCode = [int]$LASTEXITCODE
-            } else {
-                $exitCode = 0
-            }
+            # The request is written as exact ASCII bytes and fed to git by
+            # redirecting stdin from that file. Measured on this machine, under
+            # Windows PowerShell 5.1, every in-process route delivers something
+            # git rejects as "missing protocol field": StandardInput.Write, a
+            # raw BaseStream write, and a hand-built UTF8Encoding($false)
+            # StreamWriter all fail. 5.1's StandardInput encoding reports a
+            # 3-byte preamble where PowerShell 7 reports none, which is why the
+            # same code passes on 7 and fails on 5.1. Redirection from a file
+            # whose bytes we wrote ourselves is the only form measured to work
+            # on BOTH engines, so it is what the probe uses. The file holds one
+            # protocol and one hostname; it never holds a credential.
+            [IO.File]::WriteAllBytes($requestFile, [Text.Encoding]::ASCII.GetBytes("protocol=https`nhost=github.com`n`n"))
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $env:ComSpec
+            $psi.Arguments = '/c ""' + $GitPath + '" -c credential.helper= credential fill < "' + $requestFile + '""'
+            $psi.UseShellExecute = $false
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.CreateNoWindow = $true
+            $process = [System.Diagnostics.Process]::Start($psi)
+            # Start both reads before waiting. Draining one stream to the end
+            # first can deadlock on a process that fills the other's buffer.
+            $stdoutRead = $process.StandardOutput.ReadToEndAsync()
+            $stderrRead = $process.StandardError.ReadToEndAsync()
+            $process.WaitForExit()
+            $text = ($stdoutRead.Result + "`n" + $stderrRead.Result)
+            $exitCode = [int]$process.ExitCode
         } catch {
-            $lines += Redact-Text ([string]$_)
+            $text = [string]$_
             $exitCode = 1
+        } finally {
+            if ($null -ne $process) {
+                $process.Dispose()
+            }
+            if (Test-Path -LiteralPath $requestFile -PathType Leaf) {
+                Remove-Item -LiteralPath $requestFile -Force -ErrorAction SilentlyContinue
+            }
         }
 
         return [ordered]@{
             exit_code = $exitCode
-            output = (($lines -join "`n").Trim())
+            output = (Redact-Text $text).Trim()
         }
     }
     return [ordered]@{
@@ -887,6 +929,19 @@ function Invoke-SelfTest {
     }
     $credentialRefusedText = ([string]$gitCredentialFill.refused).ToLowerInvariant()
     Write-Output ("self-test: git credential fill | raw: $credentialProbeOutput | refused: $credentialRefusedText")
+
+    # Fail closed on the one regression this probe has already had. If stdin is
+    # not delivered, git answers "refusing to work with credential missing
+    # protocol field" -- a malformed-request error, NOT a credential refusal.
+    # Test-CredentialRefusal correctly scores it false, so the probe fails
+    # rather than passing, but the failure message would blame credentials.
+    # This names the real cause instead. That string must never be added to
+    # Test-CredentialRefusal's markers.
+    $stdinDelivered = -not ($credentialProbeOutput.ToLowerInvariant().Contains("missing protocol field"))
+    if (-not $stdinDelivered) {
+        $failures.Add("git credential fill received no stdin: git reported 'missing protocol field', so the request never reached it. This is a stdin delivery fault in the probe, not a credential result")
+    }
+    Write-Output ("self-test: git credential fill stdin delivered | checked for 'missing protocol field' | delivered: " + ([string]$stdinDelivered).ToLowerInvariant())
 
     $callerGhConfig = Join-Path ([IO.Path]::GetTempPath()) ("director-caller-gh-config-" + [guid]::NewGuid().ToString("N"))
     $previousGhConfig = [Environment]::GetEnvironmentVariable("GH_CONFIG_DIR", "Process")
