@@ -3,6 +3,15 @@
 Status: accepted, 2026-08-15. Supersedes nothing.
 Context: issue [#59](https://github.com/Nercari/director-core/issues/59), criterion 3.
 
+**Implementation is deliberately not part of this record.** The first attempt at
+the two scripts was written under declared self-review, and an adversarial
+cross-vendor pass then found critical defects in both: the registered task
+omitted the worktree argument, so every triggered run would have failed; the
+wrapper never asserted the running SID; and the ACL guard matched identity by
+substring instead of querying effective access. Those scripts are drafted
+pending rework. The decision below survived that review unchanged, which is why
+it is recorded separately from the code that will implement it.
+
 ## The gap
 
 `scripts/exec-jail.sh` is 75 lines and contains no account switch. It empties
