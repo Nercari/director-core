@@ -25,8 +25,14 @@ with their own review and rollback.
   distinguishes an egress block from a credential refusal;
 - a deterministic local smoke task that creates, reads, validates, and removes
   one temporary artifact in the worktree;
-- fail-closed status when the expected account, required tools, smoke task, or
-  credential refusals are not observed.
+- a write-boundary probe that attempts a write into each path the account must
+  not reach and requires every one to be refused, naming the underlying reason
+  so "access denied" is distinguishable from "path not found", and removing any
+  artifact it manages to create (issue #59, criterion 6);
+- the baseline runs this evidence should be read against, so a result is a
+  difference rather than an isolated observation (issue #59, criterion 7);
+- fail-closed status when the expected account, required tools, smoke task,
+  write boundary, baselines, or credential refusals are not observed.
 
 The probe never treats a configuration excerpt as proof. A successful
 credentialed command is a failure, not evidence of readiness. Command output is
@@ -103,11 +109,27 @@ The plain `scripts\run-restricted-account-probe.ps1` wrapper is useful for
 local mechanics, but a run from the operator checkout is not acceptance
 evidence: the proof checkout must be the fresh clone owned by `director-exec`.
 
+Pass the operator's own tree to the probe as `-ForbiddenWritePaths`, so the
+write boundary is measured against the directory that actually matters rather
+than only against the machine-wide roots, which are always included:
+
+```powershell
+-ForbiddenWritePaths @("C:\Users\dorot\Documents\AI Projects")
+```
+
+The restricted account's own profile is deliberately not a target. It needs a
+home directory and writing there is expected; the boundary under test is the
+operator's tree. A stale non-inherited `Modify` grant to `director-exec` on an
+operator worktree was found by measurement on 2026-08-15, which is the case
+this probe exists to catch.
+
 The expected success status is `completed`. Inspect the JSON itself and retain
 it as evidence. In particular, confirm `identity.user` is `director-exec`,
 `identity_checks.sid_matches_expected` is true,
 `path.user_profile_matches_expected_user` is true,
-`tools.executor.login.authenticated` is true, `smoke.passed` is true, both `gh` checks refused, and
+`tools.executor.login.authenticated` is true, `smoke.passed` is true, both `gh` checks refused,
+`write_boundary.all_refused` is true with `write_boundary.all_artifacts_removed`
+true, `baselines.all_present` is true, and
 `git_credential_fill.refused` is true. Under the restricted account's egress
 boundary, the expected `git_push_dry_run.verdict` is `egress_blocked`, and that
 verdict is a pass: the push never reached the remote. Credential absence for

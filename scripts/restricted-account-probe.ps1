@@ -7,7 +7,10 @@ param(
     [string]$Repository,
     [string]$ExecutorCommand = "codex",
     [string]$ExpectedCommit,
-    [string]$OutputPath
+    [string]$OutputPath,
+    # Paths the restricted account must NOT be able to write. The operator's
+    # own tree belongs here; the machine-wide roots are added automatically.
+    [string[]]$ForbiddenWritePaths = @()
 )
 
 Set-StrictMode -Version Latest
@@ -658,6 +661,135 @@ function Invoke-GitCredentialProbe {
     }
 }
 
+function Invoke-WriteBoundaryProbe {
+    param(
+        [string]$Repository,
+        [string[]]$ForbiddenWritePaths = @()
+    )
+
+    # Issue #59, criterion 6, second half. The smoke task proves the granted
+    # worktree is writable; this proves nothing outside it is, by TRYING rather
+    # than by reading an ACL. A configuration excerpt is not proof anywhere else
+    # in this probe and it is not proof here either: on 2026-08-15 a stale grant
+    # on the operator's own worktree was found by measurement while the ACL read
+    # alone had looked reasonable.
+    #
+    # The restricted account's OWN profile is deliberately not a target. It has
+    # to have a home and writing there is expected. The boundary that matters is
+    # the operator's tree and the machine's shared roots, so the caller passes
+    # operator paths explicitly and the universal ones are defaults.
+    $targets = New-Object System.Collections.Generic.List[string]
+    foreach ($candidate in $ForbiddenWritePaths) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+            $targets.Add($candidate)
+        }
+    }
+    foreach ($candidate in @(
+        [Environment]::GetFolderPath("Windows"),
+        [Environment]::GetEnvironmentVariable("ProgramFiles", "Process")
+    )) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+            $targets.Add($candidate)
+        }
+    }
+    $profileRoot = [Environment]::GetEnvironmentVariable("USERPROFILE", "Process")
+    if (-not [string]::IsNullOrWhiteSpace($profileRoot)) {
+        $usersRoot = Split-Path -Parent ($profileRoot.TrimEnd("\"))
+        if (-not [string]::IsNullOrWhiteSpace($usersRoot)) {
+            $targets.Add($usersRoot)
+        }
+    }
+
+    $attempts = @()
+    $allRefused = $true
+    $allCleaned = $true
+    foreach ($target in ($targets | Select-Object -Unique)) {
+        $artifact = Join-Path $target ("director-write-boundary-" + [guid]::NewGuid().ToString("N") + ".tmp")
+        $refused = $true
+        $detail = ""
+        $removed = $true
+        try {
+            [IO.File]::WriteAllText($artifact, "director write-boundary probe")
+            $refused = $false
+            $detail = "write succeeded"
+            $allRefused = $false
+        } catch {
+            $refused = $true
+            # PowerShell wraps a failing .NET call in MethodInvocationException,
+            # which names the wrapper rather than the reason. Unwrap it, so the
+            # evidence distinguishes "access denied" from "path not found".
+            $reason = $_.Exception
+            while ($null -ne $reason.InnerException) {
+                $reason = $reason.InnerException
+            }
+            $detail = Redact-Text ($reason.GetType().Name + ": " + $reason.Message)
+        }
+        # Clean up even on the path that should never be reached. An earlier
+        # probe left an artifact in the operator's worktree that was still
+        # there two weeks later.
+        if (Test-Path -LiteralPath $artifact -PathType Leaf) {
+            try {
+                Remove-Item -LiteralPath $artifact -Force -ErrorAction Stop
+                $removed = -not (Test-Path -LiteralPath $artifact -PathType Leaf)
+            } catch {
+                $removed = $false
+            }
+            if (-not $removed) {
+                $allCleaned = $false
+            }
+        }
+        $attempts += [ordered]@{
+            path = $target
+            refused = $refused
+            detail = $detail
+            artifact_removed = $removed
+        }
+    }
+
+    return [ordered]@{
+        executed = ($attempts.Count -gt 0)
+        all_refused = $allRefused
+        all_artifacts_removed = $allCleaned
+        granted_worktree = $Repository
+        attempts = @($attempts)
+    }
+}
+
+function Get-BaselineEvidence {
+    param([string]$Repository)
+
+    # Issue #59, criterion 7. Each result has to be a difference rather than an
+    # isolated observation, so the evidence names the runs it should be read
+    # against instead of leaving a reader to go find them.
+    $documents = @(
+        [ordered]@{
+            role = "unjailed operator account, for comparison"
+            path = "docs/evidence/baseline-unrestricted-2026-07-28.md"
+        },
+        [ordered]@{
+            role = "restricted account egress boundary, measured"
+            path = "docs/evidence/baseline-director-exec-2026-07-30.md"
+        }
+    )
+    $cited = @()
+    foreach ($document in $documents) {
+        $full = if ([string]::IsNullOrWhiteSpace($Repository)) {
+            $document.path
+        } else {
+            Join-Path $Repository $document.path
+        }
+        $cited += [ordered]@{
+            role = $document.role
+            path = $document.path
+            present = (Test-Path -LiteralPath $full -PathType Leaf)
+        }
+    }
+    return [ordered]@{
+        cited = @($cited)
+        all_present = (@($cited | Where-Object { -not $_.present }).Count -eq 0)
+    }
+}
+
 function New-ProbeEvidence {
     $identity = Get-CurrentIdentityEvidence
     $pathEntries = @([Environment]::GetEnvironmentVariable("Path", "Process") -split ";" |
@@ -679,6 +811,8 @@ function New-ProbeEvidence {
     $gh = Get-ToolEvidence -Name "gh"
     $credentials = Get-CredentialEvidence -GitPath $(if ($git.present) { $git.path } else { "" })
     $gitCredentialFill = Invoke-GitCredentialProbe -GitPath $(if ($git.present) { $git.path } else { "" })
+    $writeBoundary = Invoke-WriteBoundaryProbe -Repository $Repository -ForbiddenWritePaths $ForbiddenWritePaths
+    $baselines = Get-BaselineEvidence -Repository $Repository
     $repositoryEvidence = Get-RepositoryEvidence -GitPath $(if ($git.present) { $git.path } else { "" }) -RepositoryPath $Repository
     $profileRoot = if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
         ""
@@ -748,6 +882,21 @@ function New-ProbeEvidence {
     if (-not $gitCredentialFill.refused) {
         $failures.Add("git credential fill did not refuse without credentials")
     }
+    # Issue #59, criterion 6, second half.
+    if (-not $writeBoundary.executed) {
+        $failures.Add("write-boundary probe did not run; criterion 6 cannot be claimed")
+    } elseif (-not $writeBoundary.all_refused) {
+        $writable = @($writeBoundary.attempts | Where-Object { -not $_.refused } | ForEach-Object { $_.path })
+        $failures.Add("restricted account can write outside its granted worktree: " + ($writable -join ", "))
+    }
+    if ($writeBoundary.executed -and -not $writeBoundary.all_artifacts_removed) {
+        $failures.Add("write-boundary probe left an artifact behind")
+    }
+    # Issue #59, criterion 7.
+    if (-not $baselines.all_present) {
+        $missing = @($baselines.cited | Where-Object { -not $_.present } | ForEach-Object { $_.path })
+        $failures.Add("baseline evidence required for comparison is missing: " + ($missing -join ", "))
+    }
 
     $ghAuthentication = [ordered]@{ executed = $false; refused = $true; result = [ordered]@{ exit_code = 1; output = "gh not found" } }
     $ghUser = [ordered]@{ executed = $false; refused = $true; result = [ordered]@{ exit_code = 1; output = "gh not found" } }
@@ -790,7 +939,7 @@ function New-ProbeEvidence {
     }
 
     return [ordered]@{
-        schema_version = "director.restricted-account-evidence.v2"
+        schema_version = "director.restricted-account-evidence.v3"
         ticket = 59
         generated_utc = (Get-Date).ToUniversalTime().ToString("o")
         status = $(if ($failures.Count -eq 0) { "completed" } else { "failed" })
@@ -826,6 +975,8 @@ function New-ProbeEvidence {
             gh_api_user = $ghUser
         }
         smoke = $smoke
+        write_boundary = $writeBoundary
+        baselines = $baselines
         git_credential_fill = $gitCredentialFill
         git_push_dry_run = $pushProbe
         failures = @($failures)
@@ -942,6 +1093,35 @@ function Invoke-SelfTest {
         $failures.Add("git credential fill received no stdin: git reported 'missing protocol field', so the request never reached it. This is a stdin delivery fault in the probe, not a credential result")
     }
     Write-Output ("self-test: git credential fill stdin delivered | checked for 'missing protocol field' | delivered: " + ([string]$stdinDelivered).ToLowerInvariant())
+
+    # Write boundary, issue #59 criterion 6. The assertion uses a directory that
+    # cannot exist, so the result does not depend on whether whoever runs the
+    # self-test happens to be elevated. The real run gets the operator's tree
+    # through -ForbiddenWritePaths and the machine roots by default.
+    $unwritable = Join-Path ([Environment]::GetEnvironmentVariable("SystemDrive", "Process") + "\") ("director-selftest-absent-" + [guid]::NewGuid().ToString("N"))
+    $boundary = Invoke-WriteBoundaryProbe -Repository (Get-Location).Path -ForbiddenWritePaths @($unwritable)
+    $syntheticAttempt = @($boundary.attempts | Where-Object { $_.path -eq $unwritable })
+    $boundaryOkay = (
+        $boundary.executed -and
+        $syntheticAttempt.Count -eq 1 -and
+        $syntheticAttempt[0].refused -and
+        $boundary.all_artifacts_removed
+    )
+    if (-not $boundaryOkay) {
+        $failures.Add("write-boundary probe did not refuse a write into a directory that does not exist, or left an artifact")
+    }
+    foreach ($attempt in $boundary.attempts) {
+        Write-Output ("self-test: write boundary | path: " + $attempt.path + " | refused: " + ([string]$attempt.refused).ToLowerInvariant() + " | " + $attempt.detail + " | artifact removed: " + ([string]$attempt.artifact_removed).ToLowerInvariant())
+    }
+
+    # Baseline citation, issue #59 criterion 7.
+    $baselineEvidence = Get-BaselineEvidence -Repository (Get-Location).Path
+    if (-not $baselineEvidence.all_present) {
+        $failures.Add("baseline evidence documents named for comparison are missing from this checkout")
+    }
+    foreach ($citation in $baselineEvidence.cited) {
+        Write-Output ("self-test: baseline cited | " + $citation.path + " | present: " + ([string]$citation.present).ToLowerInvariant() + " | " + $citation.role)
+    }
 
     $callerGhConfig = Join-Path ([IO.Path]::GetTempPath()) ("director-caller-gh-config-" + [guid]::NewGuid().ToString("N"))
     $previousGhConfig = [Environment]::GetEnvironmentVariable("GH_CONFIG_DIR", "Process")
