@@ -14,13 +14,15 @@ with their own review and rollback.
 
 - the effective Windows account, SID, groups, process, parent process, working
   directory, user profile, and resolved tool paths;
-- the restricted account's own Codex login state, recorded only as an
-  authenticated/not-authenticated result without emitting login output;
+- the restricted account's own Codex login state, recorded as an
+  authenticated/not-authenticated result with redacted command output and the
+  effective `CODEX_HOME` value;
 - credential signals without reading credential values, including environment
   variables, the GitHub CLI hosts file, and Git credential-helper presence;
-- `gh auth status`, `gh api user`, and a credential-free `git push --dry-run`,
-  with proxy variables unset, interactive prompts disabled, and pre-push hooks
-  disabled;
+- `gh auth status`, `gh api user`, a network-free `git credential fill` refusal,
+  and a credential-free `git push --dry-run`, with proxy variables unset,
+  interactive prompts disabled, and pre-push hooks disabled; the push verdict
+  distinguishes an egress block from a credential refusal;
 - a deterministic local smoke task that creates, reads, validates, and removes
   one temporary artifact in the worktree;
 - fail-closed status when the expected account, required tools, smoke task, or
@@ -106,7 +108,11 @@ it as evidence. In particular, confirm `identity.user` is `director-exec`,
 `identity_checks.sid_matches_expected` is true,
 `path.user_profile_matches_expected_user` is true,
 `tools.executor.login.authenticated` is true, `smoke.passed` is true, both `gh` checks refused, and
-`git_push_dry_run.credential_refused` is true. A failed or incomplete report is
+`git_credential_fill.refused` is true. Under the restricted account's egress
+boundary, the expected `git_push_dry_run.verdict` is `egress_blocked`, and that
+verdict is a pass: the push never reached the remote. Credential absence for
+Git is proven by `git_credential_fill.refused`, not by the push verdict. A
+failed or incomplete report is
 not promoted by editing its status.
 
 If `tools.executor.login.authenticated` is false, complete the dedicated
