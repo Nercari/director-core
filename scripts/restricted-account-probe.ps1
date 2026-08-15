@@ -247,6 +247,8 @@ function Get-ExecutorLoginEvidence {
             authenticated = $false
             exit_code = 1
             detail = "executor is not resolvable"
+            output = "executor is not resolvable"
+            codex_home = [string]$(if ($null -eq [Environment]::GetEnvironmentVariable("CODEX_HOME", "Process")) { "" } else { [Environment]::GetEnvironmentVariable("CODEX_HOME", "Process") })
         }
     }
 
@@ -258,6 +260,8 @@ function Get-ExecutorLoginEvidence {
         authenticated = ([int]$result.exit_code -eq 0)
         exit_code = [int]$result.exit_code
         detail = $(if ([int]$result.exit_code -eq 0) { "authenticated" } else { "not authenticated" })
+        output = [string]$result.output
+        codex_home = [string]$(if ($null -eq [Environment]::GetEnvironmentVariable("CODEX_HOME", "Process")) { "" } else { [Environment]::GetEnvironmentVariable("CODEX_HOME", "Process") })
     }
 }
 
@@ -485,6 +489,53 @@ function Invoke-SmokeTask {
     return $result
 }
 
+function Test-GitPushAccepted {
+    param([AllowNull()][string]$Output)
+
+    $text = ([string]$Output).ToLowerInvariant()
+    foreach ($marker in @(
+        "everything up-to-date", "[new branch]", "[new tag]", "[up to date]",
+        "successfully pushed", "push succeeded"
+    )) {
+        if ($text.Contains($marker)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Get-GitPushVerdict {
+    param([System.Collections.IDictionary]$Result)
+
+    $text = ([string]$Result.output).ToLowerInvariant()
+    $preconditionFailure = (
+        $text.Contains("dubious ownership") -or
+        $text.Contains("detected dubious ownership")
+    )
+    if ($preconditionFailure) {
+        return "precondition_failure"
+    }
+
+    if ([int]$Result.exit_code -eq 0 -or (Test-GitPushAccepted -Output ([string]$Result.output))) {
+        return "unexpected_success"
+    }
+
+    foreach ($marker in @(
+        "could not connect", "failed to connect", "could not resolve host",
+        "connection refused", "connection timed out", "network is unreachable",
+        "couldn't connect to server"
+    )) {
+        if ($text.Contains($marker)) {
+            return "egress_blocked"
+        }
+    }
+
+    if (Test-CredentialRefusal $Result) {
+        return "credential_refused"
+    }
+    return "unexpected_success"
+}
+
 function Invoke-GitPushProbe {
     param(
         [string]$GitPath,
@@ -495,7 +546,7 @@ function Invoke-GitPushProbe {
         return [ordered]@{
             executed = $false
             expected_refusal = $true
-            credential_refused = $false
+            verdict = "precondition_failure"
             precondition_failure = $true
             exit_code = 1
             output = "git or repository directory not found"
@@ -515,9 +566,52 @@ function Invoke-GitPushProbe {
     return [ordered]@{
         executed = $true
         expected_refusal = $true
-        credential_refused = $(if (([string]$result.output).ToLowerInvariant().Contains("dubious ownership")) { $false } else { Test-CredentialRefusal $result })
+        verdict = Get-GitPushVerdict -Result $result
         precondition_failure = (([string]$result.output).ToLowerInvariant().Contains("dubious ownership"))
         exit_code = $result.exit_code
+        output = [string]$result.output
+    }
+}
+
+function Invoke-GitCredentialProbe {
+    param([string]$GitPath)
+
+    if (-not $GitPath) {
+        return [ordered]@{
+            executed = $false
+            refused = $false
+            exit_code = 1
+            output = "git not found"
+        }
+    }
+
+    $result = Invoke-WithGuardedEnvironment -UnsetProxy {
+        $inputText = "protocol=https`nhost=github.com`n`n"
+        $lines = @()
+        $exitCode = 1
+        try {
+            $lines = @($inputText | & $GitPath "-c" "credential.helper=" "credential" "fill" 2>&1 | ForEach-Object {
+                    Redact-Text ([string]$_)
+                })
+            if ($null -ne $LASTEXITCODE) {
+                $exitCode = [int]$LASTEXITCODE
+            } else {
+                $exitCode = 0
+            }
+        } catch {
+            $lines += Redact-Text ([string]$_)
+            $exitCode = 1
+        }
+
+        return [ordered]@{
+            exit_code = $exitCode
+            output = (($lines -join "`n").Trim())
+        }
+    }
+    return [ordered]@{
+        executed = $true
+        refused = (Test-CredentialRefusal $result)
+        exit_code = [int]$result.exit_code
         output = [string]$result.output
     }
 }
@@ -542,6 +636,7 @@ function New-ProbeEvidence {
     $executor["login"] = $executorLogin
     $gh = Get-ToolEvidence -Name "gh"
     $credentials = Get-CredentialEvidence -GitPath $(if ($git.present) { $git.path } else { "" })
+    $gitCredentialFill = Invoke-GitCredentialProbe -GitPath $(if ($git.present) { $git.path } else { "" })
     $repositoryEvidence = Get-RepositoryEvidence -GitPath $(if ($git.present) { $git.path } else { "" }) -RepositoryPath $Repository
     $profileRoot = if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
         ""
@@ -608,6 +703,9 @@ function New-ProbeEvidence {
     if ($credentials.git_credential_helper_configured) {
         $failures.Add("global Git credential helper is configured for the restricted probe")
     }
+    if (-not $gitCredentialFill.refused) {
+        $failures.Add("git credential fill did not refuse without credentials")
+    }
 
     $ghAuthentication = [ordered]@{ executed = $false; refused = $true; result = [ordered]@{ exit_code = 1; output = "gh not found" } }
     $ghUser = [ordered]@{ executed = $false; refused = $true; result = [ordered]@{ exit_code = 1; output = "gh not found" } }
@@ -635,7 +733,8 @@ function New-ProbeEvidence {
     $pushProbe = [ordered]@{
         executed = $false
         expected_refusal = $true
-        credential_refused = $false
+        verdict = "precondition_failure"
+        precondition_failure = $true
         exit_code = 1
         output = "not run; -Repository is required for the real account probe"
     }
@@ -643,17 +742,13 @@ function New-ProbeEvidence {
         $failures.Add("-Repository is required to prove a credential-free git push refusal")
     } else {
         $pushProbe = Invoke-GitPushProbe -GitPath $(if ($git.present) { $git.path } else { "" }) -RepositoryPath $Repository
-        if (-not $pushProbe.executed) {
-            $failures.Add("git push probe could not execute")
-        } elseif ($pushProbe.precondition_failure) {
-            $failures.Add("repository precondition failed: git reported dubious ownership; use a clean clone owned by the restricted account")
-        } elseif (-not $pushProbe.credential_refused) {
-            $failures.Add("git push --dry-run did not refuse without credentials")
+        if ($pushProbe.verdict -in @("unexpected_success", "precondition_failure")) {
+            $failures.Add("git push probe verdict was '$($pushProbe.verdict)'")
         }
     }
 
     return [ordered]@{
-        schema_version = "director.restricted-account-evidence.v1"
+        schema_version = "director.restricted-account-evidence.v2"
         ticket = 59
         generated_utc = (Get-Date).ToUniversalTime().ToString("o")
         status = $(if ($failures.Count -eq 0) { "completed" } else { "failed" })
@@ -689,6 +784,7 @@ function New-ProbeEvidence {
             gh_api_user = $ghUser
         }
         smoke = $smoke
+        git_credential_fill = $gitCredentialFill
         git_push_dry_run = $pushProbe
         failures = @($failures)
         redaction = [ordered]@{
@@ -740,6 +836,57 @@ function Invoke-SelfTest {
         $failures.Add("credential refusal guard accepted a generic network failure")
     }
     Write-Output ("self-test: credential refusal guard " + $(if ($authGuard) { "OK" } else { "FAIL" }))
+
+    $connectFailureText = "fatal: unable to access 'https://github.com/...': Failed to connect to github.com port 443 after 74 ms: Could not connect to server"
+    $connectFailureResult = [ordered]@{ exit_code = 1; output = $connectFailureText }
+    $connectFailureVerdict = Get-GitPushVerdict -Result $connectFailureResult
+    $connectFailureOkay = ($connectFailureVerdict -eq "egress_blocked")
+    if (-not $connectFailureOkay) {
+        $failures.Add("connect failure was classified as '$connectFailureVerdict' instead of 'egress_blocked'")
+    }
+    Write-Output ("self-test: git push classification | input: $connectFailureText | classified as: $connectFailureVerdict")
+
+    $ghRefusalText = "To get started with GitHub CLI, please run: gh auth login"
+    $ghRefusalResult = [ordered]@{ exit_code = 1; output = $ghRefusalText }
+    $ghRefusalVerdict = Get-GitPushVerdict -Result $ghRefusalResult
+    $ghRefusalOkay = ($ghRefusalVerdict -eq "credential_refused")
+    if (-not $ghRefusalOkay) {
+        $failures.Add("GitHub CLI refusal was classified as '$ghRefusalVerdict' instead of 'credential_refused'")
+    }
+    Write-Output ("self-test: git push classification | input: $ghRefusalText | classified as: $ghRefusalVerdict")
+
+    $exitZeroText = "Everything up-to-date"
+    $exitZeroResult = [ordered]@{ exit_code = 0; output = $exitZeroText }
+    $exitZeroVerdict = Get-GitPushVerdict -Result $exitZeroResult
+    $exitZeroOkay = ($exitZeroVerdict -eq "unexpected_success")
+    if (-not $exitZeroOkay) {
+        $failures.Add("exit-0 push result was classified as '$exitZeroVerdict' instead of 'unexpected_success'")
+    }
+    Write-Output ("self-test: git push classification | input: $exitZeroText | classified as: $exitZeroVerdict")
+
+    $unknownFailureText = "fatal: some new git error nobody has seen"
+    $unknownFailureResult = [ordered]@{ exit_code = 1; output = $unknownFailureText }
+    $unknownFailureVerdict = Get-GitPushVerdict -Result $unknownFailureResult
+    $unknownFailureOkay = ($unknownFailureVerdict -eq "unexpected_success")
+    if (-not $unknownFailureOkay) {
+        $failures.Add("unrecognised push failure was classified as '$unknownFailureVerdict' instead of 'unexpected_success'")
+    }
+    Write-Output ("self-test: git push classification | input: $unknownFailureText | classified as: $unknownFailureVerdict")
+
+    $gitPath = Resolve-Executable -Name "git"
+    $gitCredentialFill = Invoke-GitCredentialProbe -GitPath $gitPath
+    $credentialProbeOutput = ([string]$gitCredentialFill.output).Replace("`r", "").Replace("`n", "
+")
+    $credentialProbeOkay = (
+        $gitCredentialFill.executed -and
+        $gitCredentialFill.refused -and
+        $credentialProbeOutput.ToLowerInvariant().Contains("terminal prompts disabled")
+    )
+    if (-not $credentialProbeOkay) {
+        $failures.Add("live git credential fill probe did not return refused: true with terminal prompts disabled")
+    }
+    $credentialRefusedText = ([string]$gitCredentialFill.refused).ToLowerInvariant()
+    Write-Output ("self-test: git credential fill | raw: $credentialProbeOutput | refused: $credentialRefusedText")
 
     $callerGhConfig = Join-Path ([IO.Path]::GetTempPath()) ("director-caller-gh-config-" + [guid]::NewGuid().ToString("N"))
     $previousGhConfig = [Environment]::GetEnvironmentVariable("GH_CONFIG_DIR", "Process")
