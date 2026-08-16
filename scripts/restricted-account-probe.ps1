@@ -1016,14 +1016,41 @@ function Test-FileWritable {
         $typeName = $reason.GetType().Name
         # Same rule as the directory probe: ONLY an access denial is a refusal.
         # A missing file, a sharing violation, or anything else proves nothing
-        # and must fail the probe rather than pass it. UnauthorizedAccessException
-        # is reported as "OS write refused" because it also covers a read-only
-        # attribute, and this probe does not distinguish that from an ACL denial.
-        $refused = ($typeName -in @("UnauthorizedAccessException", "SecurityException"))
+        # and must fail the probe rather than pass it.
+        #
+        # THE READ-ONLY ATTRIBUTE IS NOT A REFUSAL, and the previous version of
+        # this comment knew it and scored it as one anyway. An adversarial
+        # review of the sibling change caught it. Measured 2026-08-16 on this
+        # machine, both halves:
+        #   - a file with the DOS ReadOnly attribute throws
+        #     UnauthorizedAccessException on open-for-write, which is the same
+        #     exception an ACL denial throws; and
+        #   - THE SAME ACCOUNT THAT SET THE ATTRIBUTE CAN STRIP IT AGAIN.
+        # So an account with write access could set ReadOnly, let this probe
+        # report the file protected, strip the attribute, and write. Scoring
+        # that as containment is exactly the false negative this whole file
+        # exists to eliminate.
+        #
+        # It cannot be attributed either way from the exception, so it is
+        # INCONCLUSIVE, which fails the probe. Not refused, not writable. The
+        # attribute is read rather than stripped: stripping it to find out would
+        # mutate the thing being measured.
+        $readOnlySet = $false
+        try {
+            $readOnlySet = ([IO.File]::GetAttributes($Path)).HasFlag([IO.FileAttributes]::ReadOnly)
+        } catch {
+            $readOnlySet = $false
+        }
+        $refused = (($typeName -in @("UnauthorizedAccessException", "SecurityException")) -and (-not $readOnlySet))
+        $detail = if ($readOnlySet) {
+            "READONLY ATTRIBUTE SET, so the refusal cannot be attributed to the ACL: " + $typeName + ": " + $reason.Message
+        } else {
+            $typeName + ": " + $reason.Message
+        }
         return [ordered]@{
             refused = $refused
             inconclusive = (-not $refused)
-            detail = Redact-Text ($typeName + ": " + $reason.Message)
+            detail = Redact-Text $detail
         }
     } finally {
         if ($null -ne $stream) {
@@ -1607,13 +1634,25 @@ function Invoke-SelfTest {
     }
     Write-Output ("self-test: derived forbidden set | profiles directory: " + $boundary.profiles_directory + " | derived: " + @($boundary.derived_profile_targets).Count + " | " + (@($boundary.derived_profile_targets) -join ", "))
 
-    # The measured-operation primitive. All three states are exercised with a
-    # file this self-test creates itself, so none of the assertions depends on
-    # the machine, the account, or elevation - the fault class this file has
-    # been bitten by three times. A read-only attribute produces the same
-    # UnauthorizedAccessException an ACL denial does, which is exactly why
-    # Test-FileWritable reports "OS write refused" and not "ACL denied".
+    # The measured-operation primitive. FOUR states are exercised against files
+    # this self-test creates itself, so no assertion depends on the machine, the
+    # account, or elevation - the fault class this file has been bitten by three
+    # times. The four are deliberately chosen to separate the two causes of the
+    # SAME exception:
+    #
+    #   writable      -> not refused, not inconclusive
+    #   ACL-denied    -> REFUSED. A real deny ACE, set by this process on a file
+    #                    it owns, which needs no elevation.
+    #   read-only     -> INCONCLUSIVE. Same UnauthorizedAccessException as the
+    #                    ACL denial, but the attribute is strippable by whoever
+    #                    set it, so it proves nothing about access.
+    #   absent        -> inconclusive
+    #
+    # The read-only case previously asserted REFUSED, and an adversarial review
+    # caught it. If those two cases ever collapse back into one verdict, the
+    # masking attack is live again and this block fails.
     $writableFile = Join-Path ([IO.Path]::GetTempPath()) ("director-writable-" + [guid]::NewGuid().ToString("N") + ".tmp")
+    $deniedFile = Join-Path ([IO.Path]::GetTempPath()) ("director-denied-" + [guid]::NewGuid().ToString("N") + ".tmp")
     $absentFile = Join-Path ([IO.Path]::GetTempPath()) ("director-absent-" + [guid]::NewGuid().ToString("N") + ".tmp")
     $primitiveOkay = $false
     try {
@@ -1622,27 +1661,77 @@ function Invoke-SelfTest {
         Set-ItemProperty -LiteralPath $writableFile -Name IsReadOnly -Value $true
         $readOnlyVerdict = Test-FileWritable -Path $writableFile
         Set-ItemProperty -LiteralPath $writableFile -Name IsReadOnly -Value $false
+
+        # A genuine ACL denial, with no read-only attribute anywhere near it.
+        # Owner rights let an unelevated process add a deny ACE to its own file.
+        # A bare Deny-Write ACE, and deliberately NOT a protected ACL. The first
+        # version called SetAccessRuleProtection($true, $false), which stripped
+        # the inherited rights this process needs to clean up after itself: it
+        # could then neither clear the attribute nor delete the file, and left
+        # 25 of them in the temp directory. Deny beats the inherited allow, so
+        # the write is refused either way, and FileSystemRights::Write covers
+        # neither Delete nor WRITE_DAC, so cleanup still works.
+        [IO.File]::WriteAllText($deniedFile, "director acl denial self-test")
+        $me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        $acl = Get-Acl -LiteralPath $deniedFile
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+                    $me, [Security.AccessControl.FileSystemRights]::Write,
+                    [Security.AccessControl.AccessControlType]::Deny)))
+        Set-Acl -LiteralPath $deniedFile -AclObject $acl
+        $deniedVerdict = Test-FileWritable -Path $deniedFile
+
         $absentVerdict = Test-FileWritable -Path $absentFile
         # A file that still has its content after being opened for write is the
         # non-destructive claim, measured rather than asserted in prose.
         $contentIntact = ([IO.File]::ReadAllText($writableFile) -eq "director write primitive self-test")
         $primitiveOkay = (
             (-not $writableVerdict.refused) -and (-not $writableVerdict.inconclusive) -and
-            $readOnlyVerdict.refused -and (-not $readOnlyVerdict.inconclusive) -and
+            $deniedVerdict.refused -and (-not $deniedVerdict.inconclusive) -and
+            (-not $readOnlyVerdict.refused) -and $readOnlyVerdict.inconclusive -and
             (-not $absentVerdict.refused) -and $absentVerdict.inconclusive -and
             $contentIntact
         )
         if (-not $primitiveOkay) {
-            $failures.Add("open-for-write primitive misclassified one of writable/denied/absent, or truncated the file it measured")
+            $failures.Add("open-for-write primitive misclassified one of writable/ACL-denied/read-only/absent, or truncated the file it measured")
+        }
+        # Named separately, because collapsing these two is the actual defect and
+        # a combined message would not say which way it broke.
+        if ($readOnlyVerdict.refused) {
+            $failures.Add("a READ-ONLY ATTRIBUTE was scored as a refusal; an account that can set that attribute can strip it again, so this is a false containment pass")
+        }
+        if (-not $deniedVerdict.refused) {
+            $failures.Add("a genuine deny ACE was NOT scored as a refusal, so the primitive now refuses to confirm real containment")
         }
         Write-Output ("self-test: open-for-write primitive | writable refused: " + ([string]$writableVerdict.refused).ToLowerInvariant() +
-            " | read-only refused: " + ([string]$readOnlyVerdict.refused).ToLowerInvariant() +
+            " | ACL-denied refused: " + ([string]$deniedVerdict.refused).ToLowerInvariant() +
+            " | read-only inconclusive: " + ([string]$readOnlyVerdict.inconclusive).ToLowerInvariant() +
             " | absent inconclusive: " + ([string]$absentVerdict.inconclusive).ToLowerInvariant() +
             " | content intact: " + ([string]$contentIntact).ToLowerInvariant())
+        Write-Output ("self-test: read-only is not containment | " + $readOnlyVerdict.detail)
     } finally {
-        if (Test-Path -LiteralPath $writableFile -PathType Leaf) {
-            Set-ItemProperty -LiteralPath $writableFile -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath $writableFile -Force -ErrorAction SilentlyContinue
+        # ORDER MATTERS, and it was wrong first time round: the deny ACE also
+        # denies WRITE_ATTRIBUTES, so clearing the read-only flag before
+        # removing the ACE throws and left 25 files behind in the temp
+        # directory. Drop the ACE, then the attribute, then the file. Every step
+        # is in its own try, because a cleanup that throws half way is how the
+        # litter happened.
+        foreach ($path in @($writableFile, $deniedFile)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+            try {
+                $reset = Get-Acl -LiteralPath $path
+                $reset.SetAccessRuleProtection($false, $false)
+                foreach ($rule in @($reset.Access | Where-Object { $_.AccessControlType -eq "Deny" })) {
+                    [void]$reset.RemoveAccessRule($rule)
+                }
+                Set-Acl -LiteralPath $path -AclObject $reset
+            } catch { }
+            try {
+                [IO.File]::SetAttributes($path, [IO.FileAttributes]::Normal)
+            } catch { }
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+                $failures.Add("the open-for-write primitive self-test could not remove its own artifact: " + $path)
+            }
         }
     }
 
