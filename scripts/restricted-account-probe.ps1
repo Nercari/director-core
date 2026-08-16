@@ -651,6 +651,8 @@ function Invoke-GitCredentialProbe {
         $exitCode = 1
         $text = ""
         $credentialSupplied = $false
+        $timedOut = $false
+        $exitZeroNoCredential = $false
         $process = $null
         $requestFile = Join-Path ([IO.Path]::GetTempPath()) ("director-credprobe-" + [guid]::NewGuid().ToString("N") + ".txt")
         try {
@@ -691,42 +693,58 @@ function Invoke-GitCredentialProbe {
             $psi.RedirectStandardError = $true
             $psi.CreateNoWindow = $true
             $process = [System.Diagnostics.Process]::Start($psi)
-            # stderr is drained asynchronously so stdout can be consumed a line
-            # at a time without either buffer filling and deadlocking.
+            # BOTH streams are read asynchronously. The previous version consumed
+            # stdout with a synchronous ReadLine() loop placed BEFORE
+            # WaitForExit, so a helper that never emitted a complete line blocked
+            # forever and the 60s bound was decorative. Nothing here may block on
+            # the child.
+            $stdoutRead = $process.StandardOutput.ReadToEndAsync()
             $stderrRead = $process.StandardError.ReadToEndAsync()
-            while ($null -ne ($line = $process.StandardOutput.ReadLine())) {
-                if ($line.StartsWith("password=", [StringComparison]::OrdinalIgnoreCase) -or
-                    $line.StartsWith("password_expiry_utc=", [StringComparison]::OrdinalIgnoreCase)) {
-                    $credentialSupplied = $true
-                }
-                # $line is deliberately not stored anywhere. It goes out of
-                # scope here and is the only place a secret could have entered
-                # this function.
-                $line = $null
-            }
-            # Bounded wait. AGENTS.md rule 4 requires every call to carry a
-            # timeout, and a credential helper that ignores the prompt guards
-            # can pop a GUI and hang forever.
             if (-not $process.WaitForExit(60000)) {
                 try { $process.Kill() } catch { }
+                # A hang is INCONCLUSIVE, not a credential. Scoring it "supplied"
+                # was a false positive that would hard-fail a clean restricted
+                # account whose helper merely hung.
                 $text = "credential probe timed out after 60s and was killed"
                 $exitCode = 1
-                $credentialSupplied = $true
+                $timedOut = $true
             } else {
                 $text = [string]$stderrRead.Result
                 $exitCode = [int]$process.ExitCode
-                # Two independent signals, because they disagree about which is
-                # authoritative and neither was verified for the supplied case:
-                # a `password=` key on stdout, and a zero exit. Either one means
-                # a credential came back. Failing closed toward "supplied" is
-                # the safe direction, since supplied is the HARD FAIL.
-                if ($exitCode -eq 0) {
-                    $credentialSupplied = $true
+                # The ONLY signal that a credential came back is a credential key
+                # on stdout. Exit code 0 is deliberately NOT used: git can exit 0
+                # having echoed back protocol and host with no password, and
+                # scoring that "supplied" would hard-fail a clean account and
+                # block the whole issue. Both consulted CLIs independently
+                # flagged the exit-code reading as the weakest claim.
+                #
+                # $stdout exists only inside this block. It is never returned,
+                # printed, or stored.
+                $stdout = [string]$stdoutRead.Result
+                foreach ($candidate in ($stdout -split "`n")) {
+                    $trimmed = $candidate.TrimEnd("`r")
+                    foreach ($key in @("password=", "password_expiry_utc=", "oauth_refresh_token=")) {
+                        if ($trimmed.StartsWith($key, [StringComparison]::OrdinalIgnoreCase)) {
+                            $credentialSupplied = $true
+                        }
+                    }
+                }
+                $stdout = $null
+                $trimmed = $null
+                # Exit 0 with no credential key is neither a pass nor a failure.
+                if (($exitCode -eq 0) -and (-not $credentialSupplied)) {
+                    $timedOut = $false
+                    $exitZeroNoCredential = $true
                 }
             }
         } catch {
+            # The exception message is redacted like any other output, but it is
+            # also marked inconclusive: an exception is not evidence about
+            # credentials either way.
             $text = [string]$_
             $exitCode = 1
+            $timedOut = $false
+            $exitZeroNoCredential = $true
         } finally {
             if ($null -ne $process) {
                 $process.Dispose()
@@ -739,6 +757,12 @@ function Invoke-GitCredentialProbe {
         return [ordered]@{
             exit_code = $exitCode
             credential_supplied = $credentialSupplied
+            inconclusive = ($timedOut -or $exitZeroNoCredential)
+            inconclusive_reason = $(
+                if ($timedOut) { "probe timed out; a hang is not a credential result" }
+                elseif ($exitZeroNoCredential) { "git exited 0 without returning a credential key, or the probe threw; neither proves a credential exists or is absent" }
+                else { "" }
+            )
             output = (Redact-Text $text).Trim()
         }
     }
@@ -746,10 +770,13 @@ function Invoke-GitCredentialProbe {
     # account can authenticate to the remote the executor would push to. It
     # overrides any refusal marker that also appeared on stderr.
     $supplied = [bool]$result.credential_supplied
+    $undecided = [bool]$result.inconclusive
     return [ordered]@{
         executed = $true
         credential_supplied = $supplied
-        refused = ((-not $supplied) -and (Test-CredentialRefusal $result))
+        inconclusive = $undecided
+        inconclusive_reason = [string]$result.inconclusive_reason
+        refused = ((-not $supplied) -and (-not $undecided) -and (Test-CredentialRefusal $result))
         exit_code = [int]$result.exit_code
         request = $shape
         output = [string]$result.output
@@ -1053,6 +1080,8 @@ function New-ProbeEvidence {
         $failures.Add("git credential fill SUPPLIED a credential for " +
             $gitCredentialFill.request.protocol + "://" + $gitCredentialFill.request.host +
             "; the account can authenticate to the remote")
+    } elseif ($gitCredentialFill.inconclusive) {
+        $failures.Add("git credential fill was INCONCLUSIVE: " + $gitCredentialFill.inconclusive_reason)
     } elseif (-not $gitCredentialFill.refused) {
         $failures.Add("git credential fill neither supplied a credential nor refused recognisably; the result is inconclusive")
     }
@@ -1271,7 +1300,14 @@ function Invoke-SelfTest {
     if (-not $gitCredentialFill.request.derived_from_remote) {
         $failures.Add("credential request shape was not derived from the supplied remote URL")
     }
-    Write-Output ("self-test: git credential fill | request: " + $gitCredentialFill.request.protocol + "://" + $gitCredentialFill.request.host + "/" + $gitCredentialFill.request.path + " | supplied: " + ([string]$gitCredentialFill.credential_supplied).ToLowerInvariant() + " | refused: " + ([string]$gitCredentialFill.refused).ToLowerInvariant())
+    Write-Output ("self-test: git credential fill | request: " + $gitCredentialFill.request.protocol + "://" + $gitCredentialFill.request.host + "/" + $gitCredentialFill.request.path + " | supplied: " + ([string]$gitCredentialFill.credential_supplied).ToLowerInvariant() + " | refused: " + ([string]$gitCredentialFill.refused).ToLowerInvariant() + " | inconclusive: " + ([string]$gitCredentialFill.inconclusive).ToLowerInvariant() + " " + $gitCredentialFill.inconclusive_reason)
+    # The three states are mutually exclusive. A result that is more than one of
+    # them, or none of them, is a scoring bug rather than a machine property.
+    $states = @($gitCredentialFill.credential_supplied, $gitCredentialFill.refused, $gitCredentialFill.inconclusive) |
+        Where-Object { $_ }
+    if (@($states).Count -ne 1) {
+        $failures.Add("credential probe returned " + @($states).Count + " simultaneous states; supplied, refused and inconclusive must be mutually exclusive")
+    }
     Write-Output ("self-test: git credential fill output carries no secret | checked password=, password_expiry_utc=, oauth_refresh_token= | clean: " + ([string]($leaked.Count -eq 0)).ToLowerInvariant())
     Write-Output ("self-test: git credential fill stderr | " + $credentialProbeOutput)
 
@@ -1302,12 +1338,20 @@ function Invoke-SelfTest {
     if ($absentAttempt.Count -ne 1 -or $absentAttempt[0].refused -or -not $absentAttempt[0].inconclusive) {
         $failures.Add("a nonexistent directory must be INCONCLUSIVE, never refused; that misclassification is what let the old probe pass on a machine writable everywhere")
     }
-    # A path that genuinely denies access must classify as refused. Windows
-    # denies a non-elevated write here, and the probe fails closed if it does
-    # not, rather than silently having nothing to measure.
+    # A path that genuinely denies access must classify as refused - but ONLY
+    # when this process is not elevated. An elevated run can legitimately write
+    # into the Windows directory, and asserting a denial unconditionally made
+    # the self-test fail for a correct probe depending on how it was launched.
+    # That is the same environment-dependence this file has been bitten by
+    # twice; the assertion is now conditional and says so when it is skipped.
     $denied = [Environment]::GetFolderPath("Windows")
     $deniedAttempt = @($boundary.attempts | Where-Object { $_.path -eq $denied })
-    if ($deniedAttempt.Count -ne 1 -or -not $deniedAttempt[0].refused) {
+    $selfIsElevated = ([Security.Principal.WindowsPrincipal]::new(
+            [Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+    if ($selfIsElevated) {
+        Write-Output ("self-test: refusal path NOT asserted - this session is elevated, so a write into '$denied' may legitimately succeed. Re-run unelevated to exercise it.")
+    } elseif ($deniedAttempt.Count -ne 1 -or -not $deniedAttempt[0].refused) {
         $failures.Add("expected an access denial writing into '$denied' and did not observe one; the refusal path is untested")
     }
     if (-not $boundary.executed -or -not $boundary.all_artifacts_removed) {
