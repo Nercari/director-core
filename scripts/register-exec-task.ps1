@@ -302,6 +302,24 @@ if (-not (Test-Path -LiteralPath $WrapperPath -PathType Leaf)) {
 $WrapperPath = (Resolve-Path -LiteralPath $WrapperPath).Path
 
 if ($SelfTest) {
+    # -SelfTest EXECUTES THE WRAPPER, so it must never execute one a caller
+    # named. Found by the third adversarial pass: the self-test block sits above
+    # Assert-WrapperOutsideExecutorTree and exits before reaching it, so
+    # `-SelfTest -WrapperPath <anything.ps1>` ran that file through
+    # powershell.exe with no guard whatsoever - and an operator has every reason
+    # to run -SelfTest from an elevated prompt, since registration needs
+    # elevation and the two are used together.
+    #
+    # The fix is a refusal rather than a relocated guard. The self-test's whole
+    # purpose is to exercise the wrapper that ships beside this script; there is
+    # no legitimate reason to point it somewhere else, so pointing it somewhere
+    # else is refused outright and the guard's placement stops mattering.
+    if ($PSBoundParameters.ContainsKey("WrapperPath")) {
+        throw ("-SelfTest will not run a caller-supplied -WrapperPath: it EXECUTES that file, " +
+            "and this script is normally run elevated. Run -SelfTest with no -WrapperPath so it " +
+            "exercises the wrapper shipped beside it, which is the only one it is meant to test.")
+    }
+
     # Review finding 1, answered at its root cause. The old self-test proved the
     # path guard and the evidence shape and never once ran what would actually
     # be registered, so a missing -WorktreePath survived every check. This runs
@@ -545,6 +563,25 @@ $evidencePath = Join-Path $PermittedRoot ".director\launch-evidence.json"
 # reads the old file and believes it. Any existing file is removed HERE, at
 # registration, so its absence afterwards is itself informative: no file means
 # the wrapper never ran. The wrapper stamps generated_utc for the same reason.
+#
+# AND THIS DELETE IS REPARSE-CHECKED, because without the check it was AN
+# ARBITRARY FILE DELETE PRIMITIVE FOR THE RESTRICTED ACCOUNT. These lines were
+# added in the previous round to fix the stale-evidence finding, and they run
+# ELEVATED against a path inside the tree the account controls. The account
+# makes .director a junction pointing at any operator directory, and this
+# elevated Remove-Item -Force follows it and deletes the target. A medium
+# finding was closed by opening a critical one. Found by the third adversarial
+# pass; my own fix, not inherited.
+#
+# Every other path in these two scripts is reparse-guarded. This one was not,
+# because it was written as cleanup rather than as a privileged file operation
+# on attacker-controlled ground. It is both.
+$stalePathReparse = @(Get-ReparseSegments -Path $evidencePath)
+if ($stalePathReparse.Count -gt 0) {
+    throw ("refusing to register: the evidence path traverses a reparse point, so deleting " +
+        "stale evidence there would follow it out of the permitted root and delete something " +
+        "else, elevated: " + ($stalePathReparse -join ", "))
+}
 if (Test-Path -LiteralPath $evidencePath -PathType Leaf) {
     Remove-Item -LiteralPath $evidencePath -Force -ErrorAction Stop
     Write-Output ("removed stale evidence at " + $evidencePath)

@@ -305,8 +305,24 @@ function Get-IdentityEvidence {
         sid = [string]$current.User.Value
         integrity_level = $integrity
         is_elevated = ([Security.Principal.WindowsPrincipal]::new($current)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        # THE CATCH USED TO READ $_.Value AND THAT KILLED THE WHOLE RUN. Inside
+        # a ForEach-Object catch block, $_ is the ErrorRecord, not the group, so
+        # the fallback read a property that does not exist - and under
+        # Set-StrictMode -Version Latest that throws a second exception. One
+        # untranslatable group SID in the token, which is an ordinary condition
+        # on a domain-joined machine or after an account is deleted, and the
+        # wrapper died before producing any evidence at all.
+        #
+        # The sibling scripts/restricted-account-probe.ps1 has always had this
+        # right, using a named loop variable. This is the same code with the
+        # same intent and it was wrong here for three review rounds.
         groups = @($current.Groups | ForEach-Object {
-                try { $_.Translate([Security.Principal.NTAccount]).Value } catch { $_.Value }
+                $groupSid = $_
+                try {
+                    $groupSid.Translate([Security.Principal.NTAccount]).Value
+                } catch {
+                    [string]$groupSid.Value
+                }
             } | Sort-Object)
         pid = $PID
         parent_pid = $parentId
