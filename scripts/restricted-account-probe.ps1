@@ -523,6 +523,15 @@ function Get-GitPushVerdict {
         return "unexpected_success"
     }
 
+    # Credential markers are tested BEFORE egress markers. Ballot item 8,
+    # carried 3-of-3. If output carries both, the push reached something that
+    # answered about credentials, which is the more specific fact; classifying
+    # it as egress_blocked would credit containment for a connection that
+    # actually happened.
+    if (Test-CredentialRefusal $Result) {
+        return "credential_refused"
+    }
+
     foreach ($marker in @(
         "could not connect", "failed to connect", "could not resolve host",
         "connection refused", "connection timed out", "network is unreachable",
@@ -533,9 +542,6 @@ function Get-GitPushVerdict {
         }
     }
 
-    if (Test-CredentialRefusal $Result) {
-        return "credential_refused"
-    }
     return "unexpected_success"
 }
 
@@ -576,17 +582,55 @@ function Invoke-GitPushProbe {
     }
 }
 
+function Get-CredentialRequestShape {
+    param([string]$RemoteUrl)
+
+    # The request must match the remote the executor would actually push to. A
+    # helper can be scoped to a host, a protocol, or a path prefix, so a generic
+    # request to bare https://github.com can be refused while the real remote is
+    # served. Ballot item 3, carried 3-of-3.
+    $protocol = "https"
+    $host_ = "github.com"
+    $path = ""
+    $derived = $false
+    if (-not [string]::IsNullOrWhiteSpace($RemoteUrl)) {
+        try {
+            $uri = [Uri]$RemoteUrl
+            if ($uri.Scheme -in @("http", "https")) {
+                $protocol = $uri.Scheme
+                $host_ = $uri.Host
+                $path = $uri.AbsolutePath.TrimStart("/")
+                $derived = $true
+            }
+        } catch {
+            $derived = $false
+        }
+    }
+    return [ordered]@{
+        protocol = $protocol
+        host = $host_
+        path = $path
+        derived_from_remote = $derived
+    }
+}
+
 function Invoke-GitCredentialProbe {
-    param([string]$GitPath)
+    param(
+        [string]$GitPath,
+        [string]$RemoteUrl
+    )
 
     if (-not $GitPath) {
         return [ordered]@{
             executed = $false
             refused = $false
+            credential_supplied = $false
             exit_code = 1
+            request = (Get-CredentialRequestShape -RemoteUrl $RemoteUrl)
             output = "git not found"
         }
     }
+    $shape = Get-CredentialRequestShape -RemoteUrl $RemoteUrl
 
     $result = Invoke-WithGuardedEnvironment -UnsetProxy {
         # Stdin is written through ProcessStartInfo, never through a PowerShell
@@ -606,6 +650,7 @@ function Invoke-GitCredentialProbe {
         # space or a quote, so plain joining is exact here.
         $exitCode = 1
         $text = ""
+        $credentialSupplied = $false
         $process = $null
         $requestFile = Join-Path ([IO.Path]::GetTempPath()) ("director-credprobe-" + [guid]::NewGuid().ToString("N") + ".txt")
         try {
@@ -618,24 +663,67 @@ function Invoke-GitCredentialProbe {
             # 3-byte preamble where PowerShell 7 reports none, which is why the
             # same code passes on 7 and fails on 5.1. Redirection from a file
             # whose bytes we wrote ourselves is the only form measured to work
-            # on BOTH engines, so it is what the probe uses. The file holds one
-            # protocol and one hostname; it never holds a credential.
-            [IO.File]::WriteAllBytes($requestFile, [Text.Encoding]::ASCII.GetBytes("protocol=https`nhost=github.com`n`n"))
+            # on BOTH engines, so it is what the probe uses. The request file
+            # holds a protocol, a host and a path. It never holds a credential.
+            #
+            # `credential.helper=` is NOT passed any more. Passing it disabled
+            # every configured helper and the probe then concluded from the
+            # resulting refusal that no credential existed, which was circular
+            # and true on any machine. Ballot item 3, carried 3-of-3.
+            #
+            # THE SAFETY RULE THAT FOLLOWS FROM THAT. With helpers live, a
+            # machine that HAS a credential will have git print it. `git
+            # credential fill` writes the credential to STDOUT and its errors to
+            # STDERR, so stdout is scanned line by line for a `password=` key
+            # and then DISCARDED - never accumulated, never returned, never
+            # written to the evidence file. Only stderr survives into evidence.
+            $request = "protocol=" + $shape.protocol + "`nhost=" + $shape.host
+            if (-not [string]::IsNullOrWhiteSpace($shape.path)) {
+                $request += "`npath=" + $shape.path
+            }
+            $request += "`n`n"
+            [IO.File]::WriteAllBytes($requestFile, [Text.Encoding]::ASCII.GetBytes($request))
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName = $env:ComSpec
-            $psi.Arguments = '/c ""' + $GitPath + '" -c credential.helper= credential fill < "' + $requestFile + '""'
+            $psi.Arguments = '/c ""' + $GitPath + '" credential fill < "' + $requestFile + '""'
             $psi.UseShellExecute = $false
             $psi.RedirectStandardOutput = $true
             $psi.RedirectStandardError = $true
             $psi.CreateNoWindow = $true
             $process = [System.Diagnostics.Process]::Start($psi)
-            # Start both reads before waiting. Draining one stream to the end
-            # first can deadlock on a process that fills the other's buffer.
-            $stdoutRead = $process.StandardOutput.ReadToEndAsync()
+            # stderr is drained asynchronously so stdout can be consumed a line
+            # at a time without either buffer filling and deadlocking.
             $stderrRead = $process.StandardError.ReadToEndAsync()
-            $process.WaitForExit()
-            $text = ($stdoutRead.Result + "`n" + $stderrRead.Result)
-            $exitCode = [int]$process.ExitCode
+            while ($null -ne ($line = $process.StandardOutput.ReadLine())) {
+                if ($line.StartsWith("password=", [StringComparison]::OrdinalIgnoreCase) -or
+                    $line.StartsWith("password_expiry_utc=", [StringComparison]::OrdinalIgnoreCase)) {
+                    $credentialSupplied = $true
+                }
+                # $line is deliberately not stored anywhere. It goes out of
+                # scope here and is the only place a secret could have entered
+                # this function.
+                $line = $null
+            }
+            # Bounded wait. AGENTS.md rule 4 requires every call to carry a
+            # timeout, and a credential helper that ignores the prompt guards
+            # can pop a GUI and hang forever.
+            if (-not $process.WaitForExit(60000)) {
+                try { $process.Kill() } catch { }
+                $text = "credential probe timed out after 60s and was killed"
+                $exitCode = 1
+                $credentialSupplied = $true
+            } else {
+                $text = [string]$stderrRead.Result
+                $exitCode = [int]$process.ExitCode
+                # Two independent signals, because they disagree about which is
+                # authoritative and neither was verified for the supplied case:
+                # a `password=` key on stdout, and a zero exit. Either one means
+                # a credential came back. Failing closed toward "supplied" is
+                # the safe direction, since supplied is the HARD FAIL.
+                if ($exitCode -eq 0) {
+                    $credentialSupplied = $true
+                }
+            }
         } catch {
             $text = [string]$_
             $exitCode = 1
@@ -650,13 +738,20 @@ function Invoke-GitCredentialProbe {
 
         return [ordered]@{
             exit_code = $exitCode
+            credential_supplied = $credentialSupplied
             output = (Redact-Text $text).Trim()
         }
     }
+    # A supplied credential is a HARD FAIL, not an inconclusive result: the
+    # account can authenticate to the remote the executor would push to. It
+    # overrides any refusal marker that also appeared on stderr.
+    $supplied = [bool]$result.credential_supplied
     return [ordered]@{
         executed = $true
-        refused = (Test-CredentialRefusal $result)
+        credential_supplied = $supplied
+        refused = ((-not $supplied) -and (Test-CredentialRefusal $result))
         exit_code = [int]$result.exit_code
+        request = $shape
         output = [string]$result.output
     }
 }
@@ -703,9 +798,11 @@ function Invoke-WriteBoundaryProbe {
     $attempts = @()
     $allRefused = $true
     $allCleaned = $true
+    $anyInconclusive = $false
     foreach ($target in ($targets | Select-Object -Unique)) {
         $artifact = Join-Path $target ("director-write-boundary-" + [guid]::NewGuid().ToString("N") + ".tmp")
-        $refused = $true
+        $refused = $false
+        $inconclusive = $false
         $detail = ""
         $removed = $true
         try {
@@ -714,15 +811,32 @@ function Invoke-WriteBoundaryProbe {
             $detail = "write succeeded"
             $allRefused = $false
         } catch {
-            $refused = $true
             # PowerShell wraps a failing .NET call in MethodInvocationException,
-            # which names the wrapper rather than the reason. Unwrap it, so the
-            # evidence distinguishes "access denied" from "path not found".
+            # which names the wrapper rather than the reason. Unwrap it first.
             $reason = $_.Exception
             while ($null -ne $reason.InnerException) {
                 $reason = $reason.InnerException
             }
-            $detail = Redact-Text ($reason.GetType().Name + ": " + $reason.Message)
+            $typeName = $reason.GetType().Name
+            # Ballot item 4, carried 3-of-3. ONLY an access denial counts as a
+            # refusal. Every other failure is INCONCLUSIVE and fails the probe
+            # rather than passing it. Previously every caught exception was
+            # scored `refused`, so a path that merely did not exist counted as
+            # proof of denied access -- and the self-test's target was a
+            # deliberately nonexistent directory, which meant that assertion
+            # passed on a machine where the account could write everywhere.
+            #
+            # UnauthorizedAccessException is reported as "OS access refused"
+            # rather than "ACL denied": it also covers a read-only attribute or
+            # a policy denial, and this probe does not distinguish those.
+            if ($typeName -in @("UnauthorizedAccessException", "SecurityException")) {
+                $refused = $true
+                $inconclusive = $false
+            } else {
+                $refused = $false
+                $inconclusive = $true
+            }
+            $detail = Redact-Text ($typeName + ": " + $reason.Message)
         }
         # Clean up even on the path that should never be reached. An earlier
         # probe left an artifact in the operator's worktree that was still
@@ -738,17 +852,29 @@ function Invoke-WriteBoundaryProbe {
                 $allCleaned = $false
             }
         }
+        if ($inconclusive) {
+            $anyInconclusive = $true
+            $allRefused = $false
+        }
         $attempts += [ordered]@{
             path = $target
             refused = $refused
+            inconclusive = $inconclusive
             detail = $detail
             artifact_removed = $removed
         }
     }
 
+    # An empty target list used to leave all_refused true while nothing had been
+    # attempted. Ballot item 4: no attempts is a failure, never a pass.
+    $executed = ($attempts.Count -gt 0)
+    if (-not $executed) {
+        $allRefused = $false
+    }
     return [ordered]@{
-        executed = ($attempts.Count -gt 0)
+        executed = $executed
         all_refused = $allRefused
+        any_inconclusive = $anyInconclusive
         all_artifacts_removed = $allCleaned
         granted_worktree = $Repository
         attempts = @($attempts)
@@ -771,6 +897,16 @@ function Get-BaselineEvidence {
             path = "docs/evidence/baseline-director-exec-2026-07-30.md"
         }
     )
+    # Ballot item 6, carried 3-of-3. Test-Path on a filename proved nothing: an
+    # empty or unrelated file with the right name passed. Each citation now
+    # carries a SHA-256 and a byte count.
+    #
+    # What that DOES establish: which exact document a reader must open to
+    # compare against, and that it has not silently changed between runs.
+    # What it does NOT establish: that the document is a valid baseline, that
+    # it was produced by a comparable procedure, or that the comparison is
+    # meaningful. Those are a reader's judgement and this field does not stand
+    # in for them.
     $cited = @()
     foreach ($document in $documents) {
         $full = if ([string]::IsNullOrWhiteSpace($Repository)) {
@@ -778,15 +914,43 @@ function Get-BaselineEvidence {
         } else {
             Join-Path $Repository $document.path
         }
+        $present = (Test-Path -LiteralPath $full -PathType Leaf)
+        $sha = ""
+        $bytes = 0
+        if ($present) {
+            # Hashed with .NET rather than Get-FileHash. The cmdlet failed
+            # silently when the probe was launched through cmd /c -- byte counts
+            # came back correct while every hash came back empty, and the catch
+            # below turned that into "baseline missing". A probe must not depend
+            # on which host started it; that is the same fault class as the
+            # stdin defect.
+            $hasher = $null
+            try {
+                $bytes = [int64](Get-Item -LiteralPath $full).Length
+                $hasher = [Security.Cryptography.SHA256]::Create()
+                $sha = ([BitConverter]::ToString($hasher.ComputeHash([IO.File]::ReadAllBytes($full)))).Replace("-", "")
+            } catch {
+                $sha = ""
+            } finally {
+                if ($null -ne $hasher) {
+                    $hasher.Dispose()
+                }
+            }
+        }
         $cited += [ordered]@{
             role = $document.role
             path = $document.path
-            present = (Test-Path -LiteralPath $full -PathType Leaf)
+            present = $present
+            bytes = $bytes
+            sha256 = $sha
+            # An empty or unhashable file is not a citation.
+            usable = ($present -and $bytes -gt 0 -and -not [string]::IsNullOrWhiteSpace($sha))
         }
     }
     return [ordered]@{
         cited = @($cited)
-        all_present = (@($cited | Where-Object { -not $_.present }).Count -eq 0)
+        all_present = (@($cited | Where-Object { -not $_.usable }).Count -eq 0)
+        establishes = "which document to compare against, and that it has not changed; NOT that the comparison is valid"
     }
 }
 
@@ -810,10 +974,13 @@ function New-ProbeEvidence {
     $executor["login"] = $executorLogin
     $gh = Get-ToolEvidence -Name "gh"
     $credentials = Get-CredentialEvidence -GitPath $(if ($git.present) { $git.path } else { "" })
-    $gitCredentialFill = Invoke-GitCredentialProbe -GitPath $(if ($git.present) { $git.path } else { "" })
+    # Repository evidence is gathered FIRST now: the credential probe needs the
+    # real remote URL so it can request the shape a helper would actually be
+    # scoped to, rather than a generic https://github.com.
+    $repositoryEvidence = Get-RepositoryEvidence -GitPath $(if ($git.present) { $git.path } else { "" }) -RepositoryPath $Repository
+    $gitCredentialFill = Invoke-GitCredentialProbe -GitPath $(if ($git.present) { $git.path } else { "" }) -RemoteUrl ([string]$repositoryEvidence.remote)
     $writeBoundary = Invoke-WriteBoundaryProbe -Repository $Repository -ForbiddenWritePaths $ForbiddenWritePaths
     $baselines = Get-BaselineEvidence -Repository $Repository
-    $repositoryEvidence = Get-RepositoryEvidence -GitPath $(if ($git.present) { $git.path } else { "" }) -RepositoryPath $Repository
     $profileRoot = if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
         ""
     } else {
@@ -879,23 +1046,40 @@ function New-ProbeEvidence {
     if ($credentials.git_credential_helper_configured) {
         $failures.Add("global Git credential helper is configured for the restricted probe")
     }
-    if (-not $gitCredentialFill.refused) {
-        $failures.Add("git credential fill did not refuse without credentials")
+    # A supplied credential is the hard failure; a non-refusal is the softer one.
+    # They are reported separately so a reader is never left guessing which
+    # happened.
+    if ($gitCredentialFill.credential_supplied) {
+        $failures.Add("git credential fill SUPPLIED a credential for " +
+            $gitCredentialFill.request.protocol + "://" + $gitCredentialFill.request.host +
+            "; the account can authenticate to the remote")
+    } elseif (-not $gitCredentialFill.refused) {
+        $failures.Add("git credential fill neither supplied a credential nor refused recognisably; the result is inconclusive")
+    }
+    if (-not $gitCredentialFill.request.derived_from_remote) {
+        $failures.Add("git credential fill used a generic request shape because the repository remote could not be read; a helper scoped to the real remote would not have been tested")
     }
     # Issue #59, criterion 6, second half.
     if (-not $writeBoundary.executed) {
         $failures.Add("write-boundary probe did not run; criterion 6 cannot be claimed")
-    } elseif (-not $writeBoundary.all_refused) {
-        $writable = @($writeBoundary.attempts | Where-Object { -not $_.refused } | ForEach-Object { $_.path })
-        $failures.Add("restricted account can write outside its granted worktree: " + ($writable -join ", "))
+    } else {
+        $writable = @($writeBoundary.attempts | Where-Object { (-not $_.refused) -and (-not $_.inconclusive) } | ForEach-Object { $_.path })
+        if ($writable.Count -gt 0) {
+            $failures.Add("restricted account can write outside its granted worktree: " + ($writable -join ", "))
+        }
+        $undecided = @($writeBoundary.attempts | Where-Object { $_.inconclusive } | ForEach-Object { $_.path + " (" + $_.detail + ")" })
+        if ($undecided.Count -gt 0) {
+            $failures.Add("write-boundary probe was INCONCLUSIVE for: " + ($undecided -join "; ") +
+                ". Only an access denial counts as a refusal; anything else proves nothing")
+        }
     }
     if ($writeBoundary.executed -and -not $writeBoundary.all_artifacts_removed) {
         $failures.Add("write-boundary probe left an artifact behind")
     }
     # Issue #59, criterion 7.
     if (-not $baselines.all_present) {
-        $missing = @($baselines.cited | Where-Object { -not $_.present } | ForEach-Object { $_.path })
-        $failures.Add("baseline evidence required for comparison is missing: " + ($missing -join ", "))
+        $missing = @($baselines.cited | Where-Object { -not $_.usable } | ForEach-Object { $_.path })
+        $failures.Add("baseline evidence is missing, empty, or unhashable: " + ($missing -join ", "))
     }
 
     $ghAuthentication = [ordered]@{ executed = $false; refused = $true; result = [ordered]@{ exit_code = 1; output = "gh not found" } }
@@ -1066,20 +1250,30 @@ function Invoke-SelfTest {
     }
     Write-Output ("self-test: git push classification | input: $unknownFailureText | classified as: $unknownFailureVerdict")
 
+    # The credential probe now runs with helpers LIVE, so on the operator's own
+    # account it may legitimately return a credential. Asserting refused:true
+    # here would be asserting a property of the machine running the self-test,
+    # not of the probe. What the self-test asserts instead is the property that
+    # must hold EVERYWHERE: the probe never lets a secret into its output.
     $gitPath = Resolve-Executable -Name "git"
-    $gitCredentialFill = Invoke-GitCredentialProbe -GitPath $gitPath
-    $credentialProbeOutput = ([string]$gitCredentialFill.output).Replace("`r", "").Replace("`n", "
-")
-    $credentialProbeOkay = (
-        $gitCredentialFill.executed -and
-        $gitCredentialFill.refused -and
-        $credentialProbeOutput.ToLowerInvariant().Contains("terminal prompts disabled")
-    )
-    if (-not $credentialProbeOkay) {
-        $failures.Add("live git credential fill probe did not return refused: true with terminal prompts disabled")
+    $gitCredentialFill = Invoke-GitCredentialProbe -GitPath $gitPath -RemoteUrl "https://github.com/Nercari/director-core.git"
+    $credentialProbeOutput = ([string]$gitCredentialFill.output).Replace("`r", " ").Replace("`n", " ")
+    # @() around the pipeline: under StrictMode a single match returns a scalar
+    # and no match returns $null, and .Count exists on neither.
+    $leaked = @(@("password=", "password_expiry_utc=", "oauth_refresh_token=") |
+        Where-Object { $credentialProbeOutput.ToLowerInvariant().Contains($_) })
+    if ($leaked.Count -gt 0) {
+        $failures.Add("git credential fill LEAKED a secret into probe output: matched " + ($leaked -join ", "))
     }
-    $credentialRefusedText = ([string]$gitCredentialFill.refused).ToLowerInvariant()
-    Write-Output ("self-test: git credential fill | raw: $credentialProbeOutput | refused: $credentialRefusedText")
+    if (-not $gitCredentialFill.executed) {
+        $failures.Add("git credential fill probe did not execute")
+    }
+    if (-not $gitCredentialFill.request.derived_from_remote) {
+        $failures.Add("credential request shape was not derived from the supplied remote URL")
+    }
+    Write-Output ("self-test: git credential fill | request: " + $gitCredentialFill.request.protocol + "://" + $gitCredentialFill.request.host + "/" + $gitCredentialFill.request.path + " | supplied: " + ([string]$gitCredentialFill.credential_supplied).ToLowerInvariant() + " | refused: " + ([string]$gitCredentialFill.refused).ToLowerInvariant())
+    Write-Output ("self-test: git credential fill output carries no secret | checked password=, password_expiry_utc=, oauth_refresh_token= | clean: " + ([string]($leaked.Count -eq 0)).ToLowerInvariant())
+    Write-Output ("self-test: git credential fill stderr | " + $credentialProbeOutput)
 
     # Fail closed on the one regression this probe has already had. If stdin is
     # not delivered, git answers "refusing to work with credential missing
@@ -1098,30 +1292,59 @@ function Invoke-SelfTest {
     # cannot exist, so the result does not depend on whether whoever runs the
     # self-test happens to be elevated. The real run gets the operator's tree
     # through -ForbiddenWritePaths and the machine roots by default.
-    $unwritable = Join-Path ([Environment]::GetEnvironmentVariable("SystemDrive", "Process") + "\") ("director-selftest-absent-" + [guid]::NewGuid().ToString("N"))
-    $boundary = Invoke-WriteBoundaryProbe -Repository (Get-Location).Path -ForbiddenWritePaths @($unwritable)
-    $syntheticAttempt = @($boundary.attempts | Where-Object { $_.path -eq $unwritable })
-    $boundaryOkay = (
-        $boundary.executed -and
-        $syntheticAttempt.Count -eq 1 -and
-        $syntheticAttempt[0].refused -and
-        $boundary.all_artifacts_removed
-    )
-    if (-not $boundaryOkay) {
-        $failures.Add("write-boundary probe did not refuse a write into a directory that does not exist, or left an artifact")
+    # THE ASSERTION IS INVERTED FROM THE PREVIOUS VERSION, deliberately.
+    # A nonexistent directory must classify as INCONCLUSIVE, never as refused.
+    # The old self-test asserted the opposite, which meant it passed on a
+    # machine where the account could write everywhere. Ballot item 4.
+    $absent = Join-Path ([Environment]::GetEnvironmentVariable("SystemDrive", "Process") + "\") ("director-selftest-absent-" + [guid]::NewGuid().ToString("N"))
+    $boundary = Invoke-WriteBoundaryProbe -Repository (Get-Location).Path -ForbiddenWritePaths @($absent)
+    $absentAttempt = @($boundary.attempts | Where-Object { $_.path -eq $absent })
+    if ($absentAttempt.Count -ne 1 -or $absentAttempt[0].refused -or -not $absentAttempt[0].inconclusive) {
+        $failures.Add("a nonexistent directory must be INCONCLUSIVE, never refused; that misclassification is what let the old probe pass on a machine writable everywhere")
+    }
+    # A path that genuinely denies access must classify as refused. Windows
+    # denies a non-elevated write here, and the probe fails closed if it does
+    # not, rather than silently having nothing to measure.
+    $denied = [Environment]::GetFolderPath("Windows")
+    $deniedAttempt = @($boundary.attempts | Where-Object { $_.path -eq $denied })
+    if ($deniedAttempt.Count -ne 1 -or -not $deniedAttempt[0].refused) {
+        $failures.Add("expected an access denial writing into '$denied' and did not observe one; the refusal path is untested")
+    }
+    if (-not $boundary.executed -or -not $boundary.all_artifacts_removed) {
+        $failures.Add("write-boundary probe did not execute, or left an artifact behind")
+    }
+    if (-not $boundary.any_inconclusive) {
+        $failures.Add("the inconclusive path was never exercised, so its scoring is unverified")
     }
     foreach ($attempt in $boundary.attempts) {
-        Write-Output ("self-test: write boundary | path: " + $attempt.path + " | refused: " + ([string]$attempt.refused).ToLowerInvariant() + " | " + $attempt.detail + " | artifact removed: " + ([string]$attempt.artifact_removed).ToLowerInvariant())
+        Write-Output ("self-test: write boundary | path: " + $attempt.path + " | refused: " + ([string]$attempt.refused).ToLowerInvariant() + " | inconclusive: " + ([string]$attempt.inconclusive).ToLowerInvariant() + " | " + $attempt.detail + " | artifact removed: " + ([string]$attempt.artifact_removed).ToLowerInvariant())
     }
+    # No assertion for the empty-target case, and that absence is deliberate.
+    # The three machine-wide roots are added unconditionally, so the target list
+    # cannot be empty and the guard for it is unreachable belt-and-braces. An
+    # earlier draft of this self-test "tested" it by passing no forbidden paths,
+    # which still produced three targets and asserted nothing -- precisely the
+    # check-that-proves-nothing this rework exists to remove. The guard stays in
+    # Invoke-WriteBoundaryProbe because a future caller could change the
+    # defaults; it is simply not claimed as tested.
 
     # Baseline citation, issue #59 criterion 7.
-    $baselineEvidence = Get-BaselineEvidence -Repository (Get-Location).Path
+    # The repository root is derived from THIS SCRIPT's location, not from the
+    # caller's working directory. Using Get-Location made the self-test pass
+    # when invoked one way and fail when invoked another, which is the same
+    # depends-on-how-you-launched-it fault the stdin defect had.
+    $selfTestRoot = Split-Path -Parent $PSScriptRoot
+    if ([string]::IsNullOrWhiteSpace($selfTestRoot)) {
+        $selfTestRoot = (Get-Location).Path
+    }
+    $baselineEvidence = Get-BaselineEvidence -Repository $selfTestRoot
     if (-not $baselineEvidence.all_present) {
         $failures.Add("baseline evidence documents named for comparison are missing from this checkout")
     }
     foreach ($citation in $baselineEvidence.cited) {
-        Write-Output ("self-test: baseline cited | " + $citation.path + " | present: " + ([string]$citation.present).ToLowerInvariant() + " | " + $citation.role)
+        Write-Output ("self-test: baseline cited | " + $citation.path + " | usable: " + ([string]$citation.usable).ToLowerInvariant() + " | bytes: " + $citation.bytes + " | sha256: " + $citation.sha256)
     }
+    Write-Output ("self-test: baselines establish | " + $baselineEvidence.establishes)
 
     $callerGhConfig = Join-Path ([IO.Path]::GetTempPath()) ("director-caller-gh-config-" + [guid]::NewGuid().ToString("N"))
     $previousGhConfig = [Environment]::GetEnvironmentVariable("GH_CONFIG_DIR", "Process")
