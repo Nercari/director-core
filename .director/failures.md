@@ -686,86 +686,34 @@ unfetched ref is reported `unknown`, never "absent" — the failure being closed
 here is precisely the habit of converting "I could not see it" into "it is not
 there".
 
-## 2026-08-15 — issue #59 — two acceptance criteria that the egress boundary makes unobservable
+## 2026-08-15 — two hooks that between them made ending a cycle impossible
 
-The restricted-account evidence run of 2026-08-15 completed as an experiment and
-returned `status: failed`. The failure is correct and the route stays
-`runs_as: operator`. What this entry records is that neither failure was a
-defect in the thing being measured: in both cases a control that is supposed to
-be always on fired first and removed the observation the criterion demanded.
+`require-handoff.sh` reads the handoff from `$ROOT/.director/current-handoff.json`
+in the MAIN checkout, and enforces only while `.director/active-worktree` exists.
+`block-out-of-scope-write.sh` denies every write outside the active worktree,
+gated on that same file. Both conditions hold in exactly the same state, so
+while a unit was in flight the Stop hook demanded a handoff at a path the write
+guard forbade. The cycle could not end, and could not be made to end.
 
-**Evidence.** `C:\tmp\issue59-restricted-account-probe.json`,
-`C:\tmp\issue59-clean-clone-preflight.json`, operator clone
-`C:\tmp\director-core-issue59-operator-20260811` at `a572c892`, clean.
+It bit repeatedly in one session before the shape was recognised, because each
+individual denial reads as a correct refusal. Neither hook is wrong on its own;
+the defect is only visible when you ask which states satisfy both.
 
-**What the run did establish, measured under the account's own report.**
-Effective account `Pedro-dsktp\director-exec`, SID `…-1010`, groups
-`BUILTIN\Users` only, medium integrity, no Administrators. Clean clone owned by
-the account, correct origin, full-SHA match, scoped-clean status. `git` and the
-executor CLI resolvable on the account's own PATH from a non-interactive
-invocation. No credential-bearing environment variable, no GitHub CLI hosts
-file, no configured Git credential helper. `gh auth status` and `gh api user`
-both refused locally. The local smoke task created, read, and removed its
-artifact inside the worktree.
+**Same class as the issue-59 entry above, and that is the point.** That entry
+records two acceptance criteria an always-on control made unobservable. This is
+that shape again, in the hooks rather than in a probe: a requirement whose
+precondition is the state that makes it unsatisfiable. Two instances now, in
+different subsystems, on the same day.
 
-**First unobservable criterion — push cannot authenticate.** `git push
---dry-run` failed with `Failed to connect to github.com port 443 after 74 ms`.
-The SID-scoped rules were re-read live on 2026-08-15 and are enabled: deny TCP
-outbound on every port, deny UDP except 53, for
-`S-1-5-21-…-1010`. The push therefore dies at TCP connect, before TLS and before
-any credential exchange, and `Test-CredentialRefusal` correctly declines to call
-that a credential refusal — its own self-test asserts that a generic network
-failure must not count. Containment fired first, which is a stronger result than
-credential refusal, and the probe scores it as a failure.
+**Fixed as a hook, not as prose.** `block-out-of-scope-write.sh` exempts
+`$ROOT/.director/current-handoff.*` and nothing else. That file is gitignored
+orchestrator cycle state rather than source, so the guard's actual purpose —
+keeping repository edits inside the worktree — is untouched. The self-test now
+asserts all three edges: the handoff is allowed, another `.director` file in the
+main checkout is still blocked, and a handoff-named file outside `.director` is
+still blocked.
 
-**Second unobservable criterion — the account holds its own executor login.**
-`codex login --device-auth` exited 0; the wrapper exits on non-zero and the
-probe ran afterwards, so the zero is real. `codex login status` reported
-unauthenticated immediately after, in the same account and session lineage. A
-device-code flow is an outbound HTTPS conversation with the identity provider.
-With all TCP outbound denied for this SID and the hostname proxy's allow list
-holding one Google host, no OpenAI endpoint is reachable from this account by
-any path. The account cannot complete, and cannot refresh, that login while the
-boundary is on. Which of the three candidate causes applies — the exchange never
-completed, or the status check validates online and fails without egress, or the
-two steps used different `CODEX_HOME` — was not established and is not asserted
-here. The probe made it unknowable by discarding the command's output.
-
-**Second instance of a class already recorded here.** The 2026-07-30 entry, "a
-probe reported a failure whose cause was not its own name", is this same probe
-and this same confusion: a push that died before authentication, read as a
-credential result. That entry closed with the rule that every probe in this
-repository prints raw output beside its exit code, and noted that the credential
-finding survived only because `gh auth status` and `gh api user` reach the
-answer without touching the network. Both halves are load-bearing today.
-`Get-ExecutorLoginEvidence` records `exit_code` and a synthesized string and
-drops the output, which is the practice that entry made non-negotiable. The
-threshold in AGENTS.md §"Adding anything" is met, and the correction is a script
-change, not prose.
-
-The 2026-08-01 entry above is the first #59 login failure, from an oversized
-credentialed command payload. This is the second, from a different cause, on a
-corrected launcher.
-
-**A third finding, unrelated to the two failures, found while validating.** The
-earlier run of 2026-08-01 left
-`.director-restricted-account-smoke-0d984bebd37d48a7a0cf8804564f13ee.json` in
-the operator's own worktree at `…\director-core-issue-59`, written by
-`director-exec` and never removed. It is still on disk. The ACL on that
-directory carries an explicit, non-inherited `Modify` grant to
-`Pedro-dsktp\director-exec`, presumably added so that run could write and never
-revoked. So the account has write access inside the operator's profile today.
-That is exactly what issue #59's sixth criterion forbids, and nothing in the
-probe tests it — the smoke task proves writable-inside and there is no
-assertion of not-writable-outside. Recorded, not fixed: revoking the grant is
-operator work, and the missing assertion belongs to #33's per-unit grants.
-
-**What this does not establish.** It does not establish that the probe would
-pass if the criteria were corrected — the login remains blocked by the egress
-policy, and correcting the scoring will not change that. It does not establish
-which of the three login hypotheses is true. It measures nothing about
-`scripts/exec-jail.sh`, which performs no account switch and was not exercised:
-the run used `scripts/exec-as-account.ps1` and no executor CLI ran a turn.
-Against #59's nine criteria this run meets two, partially meets four, and leaves
-three untested. Nothing here is grounds to change any route's `runs_as`, and
-none was changed.
+**The workaround used before the fix, recorded so it is not mistaken for
+policy.** The lock was released first and the handoff published afterwards. That
+works, but it publishes the handoff after the unit stops being in flight, which
+is the opposite of what §15.1 wants. It is not a substitute for the fix.

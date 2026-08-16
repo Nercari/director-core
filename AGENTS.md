@@ -62,6 +62,24 @@ The deleted rules are in git history. Earning the capability back means building
 
 `change_class` still declares intent in the packet. If it is ever ambiguous, it is `behavior`.
 
+## Running these scripts on Windows
+
+`bash` is not Git's bash from a PowerShell prompt. `C:\Windows\System32\bash.exe`
+is the WSL launcher and shadows it, so every `bash scripts/...` line here fails
+with `execvpe(/bin/bash) failed: No such file or directory` on a machine with no
+WSL distro. Measured 2026-08-16 running `worktree.sh resume`.
+`docs/operator/egress-boundary.md` had already worked around this in one place,
+which is why the note lives here instead of being fixed in that doc alone.
+
+From PowerShell, name Git's bash:
+
+```powershell
+& "$env:ProgramFiles\Git\bin\bash.exe" scripts/<script>.sh <args>
+```
+
+From Git Bash, or from an agent's own shell, `bash scripts/<script>.sh` is
+correct and unchanged. Every `bash` fence in this file is written for that shell.
+
 ## Token accounting
 
 Read the scorecard, never the raw ledger — reading it spends the budget you are measuring.
