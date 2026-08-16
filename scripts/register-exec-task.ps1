@@ -81,7 +81,18 @@ function Get-TaskActionArgument {
 }
 
 function Test-BatchLogonRight {
-    param([Parameter(Mandatory = $true)][string]$Sid)
+    param(
+        [Parameter(Mandatory = $true)][string]$Sid,
+        # Matched as well as the SID, and NOT optional in practice. Measured
+        # 2026-08-16 on this machine, reading the live export:
+        #   SeInteractiveLogonRight = Guest,*S-1-5-32-544,*S-1-5-32-545,...
+        # "Guest" is a plain ACCOUNT NAME. secedit records these entries in
+        # either form, so a SID-only match would report "not granted" for a
+        # machine where the right IS granted and Windows happened to store the
+        # name - refusing a correctly configured system and blaming the
+        # operator. Found by running the check, not by reading it.
+        [Parameter(Mandatory = $true)][string]$AccountName
+    )
 
     # THE PRECONDITION THAT WAS MISSING, AND IT COST A WHOLE EXPERIMENT.
     # Measured 2026-08-16: this task registered cleanly, Start-ScheduledTask
@@ -125,10 +136,24 @@ function Test-BatchLogonRight {
         $policy = Get-Content -LiteralPath $export
         $allow = @($policy | Where-Object { $_ -match "^SeBatchLogonRight" })
         $deny = @($policy | Where-Object { $_ -match "^SeDenyBatchLogonRight" })
-        $result.granted = ($allow -match [regex]::Escape($Sid)).Count -gt 0
+        # Either form counts. The name is matched on its own comma-delimited
+        # field so that a substring cannot produce a false positive:
+        # "director-exec-evil" must not satisfy a check for "director-exec".
+        $leaf = ($AccountName -split "\\")[-1]
+        $namePattern = "(^|[=,])\s*(\*?[A-Za-z0-9\-]+\\)?" + [regex]::Escape($leaf) + "\s*($|,)"
+        $matchesEntry = {
+            param($lines)
+            $hit = $false
+            foreach ($line in @($lines)) {
+                if ($line -match [regex]::Escape($Sid)) { $hit = $true }
+                if ($line -match $namePattern) { $hit = $true }
+            }
+            return $hit
+        }
+        $result.granted = & $matchesEntry $allow
         # DENY OVERRIDES ALLOW. Checking only the allow line would pass an account
         # that policy explicitly forbids.
-        $result.denied = ($deny -match [regex]::Escape($Sid)).Count -gt 0
+        $result.denied = & $matchesEntry $deny
         $result.detail = "allow: " + $(if ($allow) { $allow -join " " } else { "(no SeBatchLogonRight line)" }) +
             " | deny: " + $(if ($deny) { $deny -join " " } else { "(none)" })
     } catch {
@@ -494,8 +519,8 @@ if ($SelfTest) {
     # policy cannot be read at all - secedit needs elevation and -SelfTest does
     # not require it - the check reports that instead of guessing, and the
     # assertions are skipped rather than passing silently.
-    $rightKnown = Test-BatchLogonRight -Sid "S-1-5-32-544"
-    $rightAbsent = Test-BatchLogonRight -Sid "S-1-5-21-9999999999-9999999999-9999999999-4321"
+    $rightKnown = Test-BatchLogonRight -Sid "S-1-5-32-544" -AccountName "Administrators"
+    $rightAbsent = Test-BatchLogonRight -Sid "S-1-5-21-9999999999-9999999999-9999999999-4321" -AccountName "director-exec-no-such-account"
     if (-not $rightKnown.readable) {
         Write-Output ("self-test: batch logon right NOT asserted - local policy is unreadable from this session " +
             "(secedit needs elevation). " + $rightKnown.detail)
@@ -596,7 +621,7 @@ if ($administrators -contains $accountSid) {
 }
 
 # Batch logon. Without it the task registers and silently never runs.
-$batchLogon = Test-BatchLogonRight -Sid $accountSid
+$batchLogon = Test-BatchLogonRight -Sid $accountSid -AccountName $UserName
 Write-Output ("batch logon right | granted: " + ([string]$batchLogon.granted).ToLowerInvariant() +
     " | denied: " + ([string]$batchLogon.denied).ToLowerInvariant() +
     " | " + $batchLogon.detail)
