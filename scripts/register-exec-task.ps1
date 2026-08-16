@@ -80,6 +80,67 @@ function Get-TaskActionArgument {
     ) -join " "
 }
 
+function Test-BatchLogonRight {
+    param([Parameter(Mandatory = $true)][string]$Sid)
+
+    # THE PRECONDITION THAT WAS MISSING, AND IT COST A WHOLE EXPERIMENT.
+    # Measured 2026-08-16: this task registered cleanly, Start-ScheduledTask
+    # returned without error, and NOTHING HAPPENED. No process, no output, no
+    # file. Get-ScheduledTaskInfo reported LastTaskResult 0x00041303
+    # (SCHED_S_TASK_HAS_NOT_RUN) with LastRunTime at the 1999 "never" sentinel:
+    # the task had never run even once.
+    #
+    # The cause, read straight out of local policy rather than inferred:
+    #   SeBatchLogonRight = *S-1-5-32-544,*S-1-5-32-551,*S-1-5-32-559
+    # Administrators, Backup Operators, Performance Log Users. director-exec was
+    # not there. A task whose principal supplies a password needs a BATCH logon,
+    # and an account without that right cannot get one, so Task Scheduler never
+    # creates the session and never starts the action.
+    #
+    # Windows says so at registration time and the cmdlet throws the message
+    # away: RegisterTaskDefinition documents the success-with-warning HRESULT
+    # 0x0004131C, SCHED_S_BATCH_LOGON_PROBLEM - "the task is registered, but may
+    # fail to start; batch logon privilege needs to be enabled for the task
+    # principal". Register-ScheduledTask surfaces no such warning, so the only
+    # way to see it is to check the right ourselves, before registering.
+    #
+    # This script does NOT grant the right. Granting a logon right is a change to
+    # machine security policy and belongs to the operator, deliberately, in front
+    # of them - not to a script that already holds elevation for another purpose.
+    $result = [ordered]@{
+        granted = $false
+        denied = $false
+        readable = $false
+        detail = ""
+    }
+    $export = Join-Path ([IO.Path]::GetTempPath()) ("director-userrights-" + [guid]::NewGuid().ToString("N") + ".inf")
+    try {
+        & (Join-Path ([Environment]::GetFolderPath("System")) "secedit.exe") `
+            /export /areas USER_RIGHTS /cfg $export /quiet 2>&1 | Out-Null
+        if (-not (Test-Path -LiteralPath $export -PathType Leaf)) {
+            $result.detail = "secedit produced no policy export, so the right could not be read"
+            return $result
+        }
+        $result.readable = $true
+        $policy = Get-Content -LiteralPath $export
+        $allow = @($policy | Where-Object { $_ -match "^SeBatchLogonRight" })
+        $deny = @($policy | Where-Object { $_ -match "^SeDenyBatchLogonRight" })
+        $result.granted = ($allow -match [regex]::Escape($Sid)).Count -gt 0
+        # DENY OVERRIDES ALLOW. Checking only the allow line would pass an account
+        # that policy explicitly forbids.
+        $result.denied = ($deny -match [regex]::Escape($Sid)).Count -gt 0
+        $result.detail = "allow: " + $(if ($allow) { $allow -join " " } else { "(no SeBatchLogonRight line)" }) +
+            " | deny: " + $(if ($deny) { $deny -join " " } else { "(none)" })
+    } catch {
+        $result.detail = "could not read local policy: " + [string]$_
+    } finally {
+        if (Test-Path -LiteralPath $export -PathType Leaf) {
+            Remove-Item -LiteralPath $export -Force -ErrorAction SilentlyContinue
+        }
+    }
+    return $result
+}
+
 function Get-SystemPowerShellPath {
     # One resolver, used by BOTH the registered action and -SelfTest. They were
     # separate, and drifted the moment the production path was pinned: the
@@ -427,6 +488,28 @@ if ($SelfTest) {
             Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
+    # The batch-logon precondition, exercised in BOTH directions against live
+    # policy. Administrators (S-1-5-32-544) holds the right on any default
+    # Windows install; a well-formed SID that belongs to nobody does not. If the
+    # policy cannot be read at all - secedit needs elevation and -SelfTest does
+    # not require it - the check reports that instead of guessing, and the
+    # assertions are skipped rather than passing silently.
+    $rightKnown = Test-BatchLogonRight -Sid "S-1-5-32-544"
+    $rightAbsent = Test-BatchLogonRight -Sid "S-1-5-21-9999999999-9999999999-9999999999-4321"
+    if (-not $rightKnown.readable) {
+        Write-Output ("self-test: batch logon right NOT asserted - local policy is unreadable from this session " +
+            "(secedit needs elevation). " + $rightKnown.detail)
+    } else {
+        if (-not $rightKnown.granted) {
+            $failures.Add("the batch-logon check did not find the right for BUILTIN\Administrators, which holds it by default; it is reporting false for everything")
+        }
+        if ($rightAbsent.granted) {
+            $failures.Add("the batch-logon check reported the right for a SID that belongs to no account; it is reporting true for everything")
+        }
+        Write-Output ("self-test: batch logon right | Administrators granted: " + ([string]$rightKnown.granted).ToLowerInvariant() +
+            " | nonexistent SID granted: " + ([string]$rightAbsent.granted).ToLowerInvariant())
+    }
+
     Write-Output "self-test: does NOT register anything, and does NOT establish the account switch"
     if ($failures.Count -eq 0) {
         Write-Output "register-exec-task self-test PASSED"
@@ -510,6 +593,31 @@ try {
 if ($administrators -contains $accountSid) {
     throw ("refusing to register: '$UserName' is a member of the local Administrators group. " +
         "A task running as an administrator is not a containment boundary, whatever RunLevel says.")
+}
+
+# Batch logon. Without it the task registers and silently never runs.
+$batchLogon = Test-BatchLogonRight -Sid $accountSid
+Write-Output ("batch logon right | granted: " + ([string]$batchLogon.granted).ToLowerInvariant() +
+    " | denied: " + ([string]$batchLogon.denied).ToLowerInvariant() +
+    " | " + $batchLogon.detail)
+if (-not $batchLogon.readable) {
+    throw ("refusing to register: local policy could not be read, so it cannot be established that " +
+        "'$UserName' may log on as a batch job. Without that right the task registers and then " +
+        "never runs, silently. " + $batchLogon.detail)
+}
+if ($batchLogon.denied) {
+    throw ("refusing to register: '$UserName' is explicitly DENIED 'Log on as a batch job', which " +
+        "overrides any grant. The task would register and never run. Remove the deny entry in " +
+        "secpol.msc -> Local Policies -> User Rights Assignment -> Deny log on as a batch job.")
+}
+if (-not $batchLogon.granted) {
+    throw ("refusing to register: '$UserName' does not hold 'Log on as a batch job'. A task whose " +
+        "principal supplies a password needs a BATCH logon, so this task would register cleanly, " +
+        "report no error when triggered, and never run - measured on this machine 2026-08-16, " +
+        "LastTaskResult 0x00041303 SCHED_S_TASK_HAS_NOT_RUN. " + [Environment]::NewLine +
+        "GRANT IT YOURSELF, deliberately: secpol.msc -> Local Policies -> User Rights Assignment " +
+        "-> 'Log on as a batch job' -> add '$UserName'. This script will not change machine " +
+        "security policy on your behalf.")
 }
 
 # Review finding 7. The permitted root defaults to the account's OWN profile and

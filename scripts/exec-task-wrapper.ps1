@@ -451,6 +451,37 @@ function New-LaunchEvidence {
     }
 }
 
+function New-IncompleteEvidence {
+    param(
+        [Parameter(Mandatory = $true)]$ErrorRecord,
+        [AllowNull()][string]$RequiredSid
+    )
+
+    # A separate function purely so the self-test can exercise it with a real
+    # caught error. Inline in the catch it was untestable, which is the same
+    # fault as every other check in this file that was asserted rather than run.
+    $reason = $ErrorRecord.Exception
+    while ($null -ne $reason.InnerException) { $reason = $reason.InnerException }
+    return [ordered]@{
+        schema_version = "director.restricted-launch-evidence.v2"
+        ticket = 59
+        generated_utc = (Get-Date).ToUniversalTime().ToString("o")
+        status = "incomplete"
+        expected_sid = [string]$RequiredSid
+        incomplete_reason = ($reason.GetType().Name + ": " + $reason.Message)
+        incomplete_at = [string]$ErrorRecord.InvocationInfo.PositionMessage
+        # Deliberately minimal. Anything gathered here would be gathered by the
+        # same code that just threw, so it is not trustworthy and is not
+        # collected. This record says WHERE the run died; it does not stand in
+        # for evidence that was never produced.
+        identity = [ordered]@{
+            user = [string]([Security.Principal.WindowsIdentity]::GetCurrent().Name)
+            sid = [string]([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+        }
+        failures = @("the wrapper threw before it could reach a verdict; this record is NOT a containment result")
+    }
+}
+
 function Invoke-SelfTest {
     # Runs without administrative rights, without the scheduled task, and
     # without the director-exec account existing. It proves the path guard, the
@@ -614,6 +645,33 @@ function Invoke-SelfTest {
     Write-Output ("self-test: reports its own token | user: " + $evidence.identity.user + " | sid: " + $evidence.identity.sid + " | integrity: " + $evidence.identity.integrity_level)
     Write-Output ("self-test: parent process recorded as DATA, not provenance | parent: " + $evidence.identity.parent_process +
         " | establishes provenance: " + ([string]$evidence.identity.parent_process_establishes_provenance).ToLowerInvariant())
+    # The incomplete path, exercised with a REAL caught error rather than
+    # described. On 2026-08-16 the registered task produced no file at all and
+    # the absence could not distinguish "never launched" from "crashed" from
+    # "declined to write". This record exists so that never happens silently
+    # again, and these assertions exist so the record is not itself a fiction.
+    $incomplete = $null
+    try {
+        throw "synthetic failure for the incomplete-evidence self-test"
+    } catch {
+        $incomplete = New-IncompleteEvidence -ErrorRecord $_ -RequiredSid "S-1-5-18"
+    }
+    if ($incomplete.status -ne "incomplete") {
+        $failures.Add("a run that threw produced status '" + $incomplete.status + "' instead of 'incomplete'")
+    }
+    if ($incomplete.status -eq "completed") {
+        $failures.Add("a run that threw reported COMPLETED; incomplete must never be readable as success")
+    }
+    if (-not ([string]$incomplete.incomplete_reason).Contains("synthetic failure")) {
+        $failures.Add("the incomplete record did not carry the reason it was incomplete")
+    }
+    if (@($incomplete.failures).Count -lt 1) {
+        $failures.Add("the incomplete record carried no failures entry saying it is not a containment result")
+    }
+    Write-Output ("self-test: incomplete evidence | status: " + $incomplete.status +
+        " | reason: " + $incomplete.incomplete_reason)
+    Write-Output "self-test: three states are completed / failed / incomplete - a consumer must require 'completed', never file existence"
+
     Write-Output "self-test: does NOT establish the account switch - that needs the registered task, and the operator to register it"
 
     if ($failures.Count -eq 0) {
@@ -632,7 +690,31 @@ $selfPath = $PSCommandPath
 if ([string]::IsNullOrWhiteSpace($selfPath)) {
     $selfPath = $MyInvocation.MyCommand.Path
 }
-$evidence = New-LaunchEvidence -Worktree $WorktreePath -Root $PermittedRoot -RequiredSid $ExpectedSid -WrapperPath $selfPath
+
+# EVIDENCE IS NOW WRITTEN ON THE FAILURE PATH TOO, and the reason is measured
+# rather than theoretical. On 2026-08-16 the registered task produced NOTHING -
+# no directory, no file, no output - and the absence was indistinguishable
+# between "never launched", "launched and crashed", and "ran and declined to
+# write". It turned out to be the first, but nothing in this script could have
+# told anyone that.
+#
+# The old shape guaranteed that ambiguity: $ErrorActionPreference = "Stop" plus
+# Set-StrictMode -Version Latest means ANY throw anywhere skips the write at the
+# bottom of the file, so the one artefact a reader depends on is exactly the
+# thing that disappears when something goes wrong.
+#
+# THREE STATES, not two. "completed" means every check passed. "failed" means the
+# checks ran and some did not pass - a real verdict. "incomplete" means the run
+# died before it could reach a verdict, which is NOT a verdict and must never be
+# read as one. A consumer must require status = "completed"; the presence of the
+# file has never meant success and now cannot be mistaken for it.
+$evidence = $null
+try {
+    $evidence = New-LaunchEvidence -Worktree $WorktreePath -Root $PermittedRoot -RequiredSid $ExpectedSid -WrapperPath $selfPath
+} catch {
+    $evidence = New-IncompleteEvidence -ErrorRecord $_ -RequiredSid $ExpectedSid
+}
+
 $json = $evidence | ConvertTo-Json -Depth 6
 if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
     $parent = Split-Path -Parent $OutputPath
