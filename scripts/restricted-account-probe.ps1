@@ -989,6 +989,106 @@ function Invoke-WriteBoundaryProbe {
     }
 }
 
+function Test-FileWritable {
+    # THE MEASURED-OPERATION PRIMITIVE. Opening for write is the operation an
+    # attacker would perform, so it is the operation this probe performs. It is
+    # NOT an effective-access query: an access query answers what the ACL says,
+    # and on 2026-08-15 an ACL that read as reasonable was found to be a stale
+    # grant by measurement. FileMode.Open means the file must already exist and
+    # is neither created nor truncated; the handle is closed without a single
+    # byte written, so the probe cannot damage the file it is measuring.
+    param([string]$Path)
+
+    $stream = $null
+    try {
+        $stream = [IO.File]::Open(
+            $Path,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::ReadWrite
+        )
+        return [ordered]@{ refused = $false; inconclusive = $false; detail = "opened for write" }
+    } catch {
+        $reason = $_.Exception
+        while ($null -ne $reason.InnerException) {
+            $reason = $reason.InnerException
+        }
+        $typeName = $reason.GetType().Name
+        # Same rule as the directory probe: ONLY an access denial is a refusal.
+        # A missing file, a sharing violation, or anything else proves nothing
+        # and must fail the probe rather than pass it. UnauthorizedAccessException
+        # is reported as "OS write refused" because it also covers a read-only
+        # attribute, and this probe does not distinguish that from an ACL denial.
+        $refused = ($typeName -in @("UnauthorizedAccessException", "SecurityException"))
+        return [ordered]@{
+            refused = $refused
+            inconclusive = (-not $refused)
+            detail = Redact-Text ($typeName + ": " + $reason.Message)
+        }
+    } finally {
+        if ($null -ne $stream) {
+            $stream.Dispose()
+        }
+    }
+}
+
+function Invoke-ScriptWriteProbe {
+    param([string]$Repository)
+
+    # Issue #59. The executor runs the probe that judges it out of the clone it
+    # was granted, and the clone was handed over with Modify on the WHOLE tree -
+    # scripts included. An account that can rewrite scripts\restricted-account-probe.ps1
+    # can make the probe report whatever it likes, so every other result in this
+    # file is worth nothing until this one is refused. Recorded 2026-08-15.
+    $scriptsDirectory = if ([string]::IsNullOrWhiteSpace($Repository)) {
+        ""
+    } else {
+        Join-Path $Repository "scripts"
+    }
+    $attempts = @()
+    $allRefused = $true
+    $anyInconclusive = $false
+    $files = @()
+    if (-not [string]::IsNullOrWhiteSpace($scriptsDirectory) -and
+        (Test-Path -LiteralPath $scriptsDirectory -PathType Container)) {
+        try {
+            $files = @(Get-ChildItem -LiteralPath $scriptsDirectory -Filter "*.ps1" -File -Recurse -ErrorAction Stop |
+                    ForEach-Object { [string]$_.FullName } | Sort-Object)
+        } catch {
+            $files = @()
+        }
+    }
+    foreach ($file in $files) {
+        $verdict = Test-FileWritable -Path $file
+        if (-not $verdict.refused) {
+            $allRefused = $false
+        }
+        if ($verdict.inconclusive) {
+            $anyInconclusive = $true
+        }
+        $attempts += [ordered]@{
+            path = $file
+            refused = [bool]$verdict.refused
+            inconclusive = [bool]$verdict.inconclusive
+            detail = [string]$verdict.detail
+        }
+    }
+    # No files attempted is a failure, never a pass - the same rule the
+    # directory probe needed for the same reason.
+    $executed = ($attempts.Count -gt 0)
+    if (-not $executed) {
+        $allRefused = $false
+    }
+    return [ordered]@{
+        executed = $executed
+        scripts_directory = $scriptsDirectory
+        all_refused = $allRefused
+        any_inconclusive = $anyInconclusive
+        method = "open for write with FileMode.Open; no bytes written, nothing created, nothing truncated"
+        attempts = @($attempts)
+    }
+}
+
 function Get-BaselineEvidence {
     param([string]$Repository)
 
@@ -1088,6 +1188,7 @@ function New-ProbeEvidence {
     $repositoryEvidence = Get-RepositoryEvidence -GitPath $(if ($git.present) { $git.path } else { "" }) -RepositoryPath $Repository
     $gitCredentialFill = Invoke-GitCredentialProbe -GitPath $(if ($git.present) { $git.path } else { "" }) -RemoteUrl ([string]$repositoryEvidence.remote)
     $writeBoundary = Invoke-WriteBoundaryProbe -Repository $Repository -ForbiddenWritePaths $ForbiddenWritePaths
+    $scriptWriteBoundary = Invoke-ScriptWriteProbe -Repository $Repository
     $baselines = Get-BaselineEvidence -Repository $Repository
     $profileRoot = if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
         ""
@@ -1191,6 +1292,25 @@ function New-ProbeEvidence {
     if ($writeBoundary.executed -and -not $writeBoundary.all_artifacts_removed) {
         $failures.Add("write-boundary probe left an artifact behind")
     }
+    # The executor must not be able to rewrite the probe that judges it.
+    if (-not $scriptWriteBoundary.executed) {
+        $failures.Add("script write-boundary probe found no scripts to open under '" +
+            $scriptWriteBoundary.scripts_directory + "'; the probe cannot vouch for its own integrity")
+    } else {
+        $writableScripts = @($scriptWriteBoundary.attempts |
+            Where-Object { (-not $_.refused) -and (-not $_.inconclusive) } |
+            ForEach-Object { $_.path })
+        if ($writableScripts.Count -gt 0) {
+            $failures.Add("restricted account can open the probe's own scripts for writing, so every other result here is unverifiable: " +
+                ($writableScripts -join ", "))
+        }
+        $undecidedScripts = @($scriptWriteBoundary.attempts |
+            Where-Object { $_.inconclusive } |
+            ForEach-Object { $_.path + " (" + $_.detail + ")" })
+        if ($undecidedScripts.Count -gt 0) {
+            $failures.Add("script write-boundary probe was INCONCLUSIVE for: " + ($undecidedScripts -join "; "))
+        }
+    }
     # Issue #59, criterion 7.
     if (-not $baselines.all_present) {
         $missing = @($baselines.cited | Where-Object { -not $_.usable } | ForEach-Object { $_.path })
@@ -1275,6 +1395,7 @@ function New-ProbeEvidence {
         }
         smoke = $smoke
         write_boundary = $writeBoundary
+        script_write_boundary = $scriptWriteBoundary
         baselines = $baselines
         git_credential_fill = $gitCredentialFill
         git_push_dry_run = $pushProbe
@@ -1485,6 +1606,61 @@ function Invoke-SelfTest {
         $failures.Add("derived forbidden paths were never attempted: " + ($notAttempted -join ", "))
     }
     Write-Output ("self-test: derived forbidden set | profiles directory: " + $boundary.profiles_directory + " | derived: " + @($boundary.derived_profile_targets).Count + " | " + (@($boundary.derived_profile_targets) -join ", "))
+
+    # The measured-operation primitive. All three states are exercised with a
+    # file this self-test creates itself, so none of the assertions depends on
+    # the machine, the account, or elevation - the fault class this file has
+    # been bitten by three times. A read-only attribute produces the same
+    # UnauthorizedAccessException an ACL denial does, which is exactly why
+    # Test-FileWritable reports "OS write refused" and not "ACL denied".
+    $writableFile = Join-Path ([IO.Path]::GetTempPath()) ("director-writable-" + [guid]::NewGuid().ToString("N") + ".tmp")
+    $absentFile = Join-Path ([IO.Path]::GetTempPath()) ("director-absent-" + [guid]::NewGuid().ToString("N") + ".tmp")
+    $primitiveOkay = $false
+    try {
+        [IO.File]::WriteAllText($writableFile, "director write primitive self-test")
+        $writableVerdict = Test-FileWritable -Path $writableFile
+        Set-ItemProperty -LiteralPath $writableFile -Name IsReadOnly -Value $true
+        $readOnlyVerdict = Test-FileWritable -Path $writableFile
+        Set-ItemProperty -LiteralPath $writableFile -Name IsReadOnly -Value $false
+        $absentVerdict = Test-FileWritable -Path $absentFile
+        # A file that still has its content after being opened for write is the
+        # non-destructive claim, measured rather than asserted in prose.
+        $contentIntact = ([IO.File]::ReadAllText($writableFile) -eq "director write primitive self-test")
+        $primitiveOkay = (
+            (-not $writableVerdict.refused) -and (-not $writableVerdict.inconclusive) -and
+            $readOnlyVerdict.refused -and (-not $readOnlyVerdict.inconclusive) -and
+            (-not $absentVerdict.refused) -and $absentVerdict.inconclusive -and
+            $contentIntact
+        )
+        if (-not $primitiveOkay) {
+            $failures.Add("open-for-write primitive misclassified one of writable/denied/absent, or truncated the file it measured")
+        }
+        Write-Output ("self-test: open-for-write primitive | writable refused: " + ([string]$writableVerdict.refused).ToLowerInvariant() +
+            " | read-only refused: " + ([string]$readOnlyVerdict.refused).ToLowerInvariant() +
+            " | absent inconclusive: " + ([string]$absentVerdict.inconclusive).ToLowerInvariant() +
+            " | content intact: " + ([string]$contentIntact).ToLowerInvariant())
+    } finally {
+        if (Test-Path -LiteralPath $writableFile -PathType Leaf) {
+            Set-ItemProperty -LiteralPath $writableFile -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $writableFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    # And the primitive applied to the checkout the self-test is running from.
+    # No verdict is asserted: on the operator's own account the scripts SHOULD
+    # be writable, and asserting a refusal here would be asserting a property of
+    # whoever launched the self-test rather than of the probe. What is asserted
+    # is that it found scripts to measure at all.
+    # Derived from THIS SCRIPT's location, never from the caller's working
+    # directory, for the reason recorded against the baseline citation below.
+    $scriptBoundary = Invoke-ScriptWriteProbe -Repository (Split-Path -Parent $PSScriptRoot)
+    if (-not $scriptBoundary.executed) {
+        $failures.Add("script write-boundary probe found no scripts under '" + $scriptBoundary.scripts_directory + "'")
+    }
+    Write-Output ("self-test: script write boundary | directory: " + $scriptBoundary.scripts_directory +
+        " | files measured: " + @($scriptBoundary.attempts).Count +
+        " | all refused: " + ([string]$scriptBoundary.all_refused).ToLowerInvariant() +
+        " | method: " + $scriptBoundary.method)
     # No assertion for the empty-target case, and that absence is deliberate.
     # The three machine-wide roots are added unconditionally, so the target list
     # cannot be empty and the guard for it is unreachable belt-and-braces. An
