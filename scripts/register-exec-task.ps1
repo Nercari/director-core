@@ -20,11 +20,16 @@
 # the argument string this script would register, through the same builder.
 #
 # DEPENDENCIES, stated rather than glossed. Get-LocalUser, Get-LocalGroupMember,
-# Get-ScheduledTask, New-ScheduledTaskAction, New-ScheduledTaskPrincipal,
-# New-ScheduledTaskSettingsSet and Register-ScheduledTask are MODULE cmdlets
-# (Microsoft.PowerShell.LocalAccounts, ScheduledTasks), not engine built-ins.
-# The previous claim that this script was "5.1-safe" was narrower than stated:
-# it is 5.1-safe on a Windows install that ships those modules.
+# Get-ScheduledTask, New-ScheduledTaskAction, New-ScheduledTaskSettingsSet and
+# Register-ScheduledTask are MODULE cmdlets (Microsoft.PowerShell.LocalAccounts,
+# ScheduledTasks), not engine built-ins. The previous claim that this script was
+# "5.1-safe" was narrower than stated: it is 5.1-safe on a Windows install that
+# ships those modules. secedit.exe is also required, for the batch-logon check.
+#
+# New-ScheduledTaskPrincipal was listed here until 2026-08-16 and is NOT called -
+# it was removed when the Register-ScheduledTask parameter-set defect was fixed.
+# A dependency list that names something the script does not use is the same
+# class of defect as a comment claiming a guarantee the code does not provide.
 [CmdletBinding()]
 param(
     [string]$TaskName = "director-exec-launch",
@@ -43,9 +48,7 @@ param(
     # Baked in here, one fixed path, re-pointed by the operator between units.
     [string]$WorktreePath = "",
     [switch]$Verify,
-    [switch]$SelfTest,
-    # Deliberate override for the ADR account pin below. Not a default.
-    [switch]$AllowOtherAccount
+    [switch]$SelfTest
 )
 
 Set-StrictMode -Version Latest
@@ -196,7 +199,7 @@ function Test-RegisterParametersBindToOneSet {
     # a single set. No registration, no elevation, no side effects, and it
     # cannot go stale the way a comment can.
     $names = Get-RegisterParameterNames
-    $command = Get-Command -Name "Register-ScheduledTask" -ErrorAction SilentlyContinue
+    $command = Get-Command -Name "ScheduledTasks\Register-ScheduledTask" -ErrorAction SilentlyContinue
     if ($null -eq $command) {
         return [ordered]@{
             ok = $false
@@ -240,7 +243,18 @@ function Get-ReparseSegments {
     } catch {
         return @("<unresolvable: " + $Path + ">")
     }
-    for ($depth = 0; $depth -lt 64 -and -not [string]::IsNullOrWhiteSpace($current); $depth++) {
+    # THE BOUND IS DERIVED FROM THE PATH, not a guessed constant. A flat 64 was
+    # fail-open first (it returned an empty list at the cap, indistinguishable
+    # from a clean walk) and then, once made fail-closed, fail-WRONG: a
+    # legitimately deep path returned "walk incomplete" and callers read that as
+    # a reparse failure. Neither is acceptable for a guard.
+    #
+    # A path cannot have more separators than it has characters, and each
+    # iteration strips exactly one component, so the component count plus a
+    # small margin is an EXACT ceiling that can never be reached by a valid path
+    # and still cannot spin on a malformed one.
+    $maxDepth = ($current.Split([char]92).Count) + 4
+    for ($depth = 0; $depth -lt $maxDepth -and -not [string]::IsNullOrWhiteSpace($current); $depth++) {
         if (Test-Path -LiteralPath $current) {
             # Fails closed, same as the wrapper's copy: a segment whose
             # attributes cannot be read is REPORTED, not skipped.
@@ -266,7 +280,7 @@ function Get-ReparseSegments {
     # path with more than 64 components followed by a junction would have been
     # accepted. A walk that did not reach the root is now REPORTED.
     if (-not $reachedRoot) {
-        $found.Add("<walk incomplete past 64 levels: " + $Path + ">")
+        $found.Add("<walk did not reach the filesystem root: " + $Path + ">")
     }
     return @($found)
 }
@@ -577,13 +591,18 @@ if (-not (Test-Elevated)) {
 # account. Overriding it is possible but must be deliberate and visible in the
 # command line, not a default that silently drifts.
 $adrAccount = "director-exec"
-if ($UserName -ine $adrAccount -and -not $AllowOtherAccount) {
-    throw ("refusing to register for '$UserName': ADR 0001 specifies '$adrAccount'. " +
-        "Pass -AllowOtherAccount to override deliberately; every claim in the ADR and in " +
-        "the evidence is about '$adrAccount' and does not transfer to another account.")
-}
+# NO OVERRIDE. -AllowOtherAccount used to let an elevated caller point the whole
+# mechanism at any other non-administrator account behind a printed warning,
+# which contradicted the ADR's own statement that this is about one named
+# account. A switch that lets a caller leave the documented threat model, gated
+# by a message nobody reads, is not a safeguard - it is an untested
+# configuration path with a warning attached. Both consulted CLIs and the
+# adversarial review agreed it should go, and it is gone.
 if ($UserName -ine $adrAccount) {
-    Write-Output ("WARNING: registering for '$UserName', which is NOT the ADR account '$adrAccount'.")
+    throw ("refusing to register for '$UserName': ADR 0001 specifies '$adrAccount', and every " +
+        "claim in that ADR and in the evidence this produces is about '$adrAccount'. None of it " +
+        "transfers to another account. Registering a different one needs a different ADR, not a " +
+        "switch.")
 }
 
 $account = Get-LocalUser -Name $UserName -ErrorAction SilentlyContinue
@@ -595,10 +614,40 @@ $accountSid = [string]$account.SID.Value
 # Review finding 10. RunLevel Limited does not by itself establish that the
 # account is not an administrator: it caps the token of an account that could
 # otherwise elevate. Assert the membership instead of inferring it.
+#
+# AND IT EXPANDS NESTED GROUPS. The previous version read the DIRECT members of
+# Administrators only, so an account that is an administrator BY GROUP - a local
+# or domain group that is itself a member - passed the guard.
+#
+# The Gemini CLI recommended doing nothing here, on the uncited claim that SAM
+# forbids a local group from containing a local group, which would make the
+# direct check sufficient. That claim was not verified, and it is not what this
+# check should rest on. Measured on this machine: Administrators holds two Users
+# and no groups, and PartOfDomain is False, so the shortcut happens to be safe
+# HERE - by accident of configuration, not by argument. Expanding costs a few
+# lines and is correct either way, including the day this machine joins a domain.
+#
+# A group that cannot be expanded is a REFUSAL, not a skip: an unexpandable
+# member could be the one that contains the account.
 $administrators = @()
 try {
-    $administrators = @(Get-LocalGroupMember -SID "S-1-5-32-544" -ErrorAction Stop |
-            ForEach-Object { [string]$_.SID.Value })
+    $pending = New-Object System.Collections.Generic.Queue[string]
+    $pending.Enqueue("S-1-5-32-544")
+    $seenGroups = @{}
+    $collected = New-Object System.Collections.Generic.List[string]
+    while ($pending.Count -gt 0) {
+        $groupSid = $pending.Dequeue()
+        if ($seenGroups.ContainsKey($groupSid)) { continue }   # cycles cannot spin this
+        $seenGroups[$groupSid] = $true
+        foreach ($member in @(Get-LocalGroupMember -SID $groupSid -ErrorAction Stop)) {
+            $memberSid = [string]$member.SID.Value
+            $collected.Add($memberSid)
+            if ([string]$member.ObjectClass -eq "Group") {
+                $pending.Enqueue($memberSid)
+            }
+        }
+    }
+    $administrators = @($collected)
 } catch {
     # FAILS CLOSED, deliberately, and the failure names its own workaround.
     # Get-LocalGroupMember is known to throw on a group containing an
@@ -809,7 +858,11 @@ try {
         if ($registerArguments.Count -ne (Get-RegisterParameterNames).Count) {
             throw "internal: the registration call and Get-RegisterParameterNames have drifted apart"
         }
-        Register-ScheduledTask @registerArguments | Out-Null
+        # MODULE-QUALIFIED, and the guard above resolves the SAME qualified name.
+        # Unqualified, a shadowing function could satisfy Get-Command's metadata
+        # check and then receive the actual call. Qualifying both ends means the
+        # thing that was validated is the thing that runs.
+        ScheduledTasks\Register-ScheduledTask @registerArguments | Out-Null
     } finally {
         [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
     }

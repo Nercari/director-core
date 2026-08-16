@@ -120,6 +120,26 @@ Acceptance for this mechanism is: a triggered run reports SID
 `wrapper_self_protection.wrapper_writable` and `.directory_writable` both false,
 measured by attempting the writes rather than reading an ACL.
 
+**Amended 2026-08-16, third amendment — the evidence path has an unclosed race,
+and the fix is a relocation nobody has done yet.** The wrapper checks the
+evidence path for reparse points and then writes to it; the account owns that
+tree and can swap a directory for a junction in between. Both consulted CLIs
+were asked for a way to close this on PowerShell 5.1 and neither found one worth
+taking — `FILE_FLAG_OPEN_REPARSE_POINT` opens the reparse object rather than
+refusing traversal, and a relative open via `NtCreateFile`'s `RootDirectory`
+needs P/Invoke these scripts will not carry. **The real fix is to move the
+evidence out of the account-owned tree**, into a directory the operator owns
+where the account may write a file but cannot replace the directory entry. That
+is the upgrade path. Until it is done, the reparse check is a misconfiguration
+guard and is not atomic, and nothing here should describe it as one.
+
+A related limit, stated because it is easy to over-claim: a run that dies
+without throwing now leaves a `pending` record rather than the previous run's
+verdict, but a task that **never launches** writes nothing at all, so whatever
+was on disk survives. Only the caller can close that, by invalidating before
+triggering. Timestamp freshness alone is not sufficient — a fixed action carries
+no trusted per-run identifier.
+
 **Amended 2026-08-16, second amendment — that evidence is a self-report, not
 proof.** An adversarial review pointed out that the wrapper runs *as* the
 restricted account and writes its JSON into a directory that account controls,

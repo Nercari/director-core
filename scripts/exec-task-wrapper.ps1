@@ -95,7 +95,18 @@ function Get-ReparseSegments {
         return @("<unresolvable: " + $Path + ">")
     }
     # Bounded: a malformed path must not spin here.
-    for ($depth = 0; $depth -lt 64 -and -not [string]::IsNullOrWhiteSpace($current); $depth++) {
+    # THE BOUND IS DERIVED FROM THE PATH, not a guessed constant. A flat 64 was
+    # fail-open first (it returned an empty list at the cap, indistinguishable
+    # from a clean walk) and then, once made fail-closed, fail-WRONG: a
+    # legitimately deep path returned "walk incomplete" and callers read that as
+    # a reparse failure. Neither is acceptable for a guard.
+    #
+    # A path cannot have more separators than it has characters, and each
+    # iteration strips exactly one component, so the component count plus a
+    # small margin is an EXACT ceiling that can never be reached by a valid path
+    # and still cannot spin on a malformed one.
+    $maxDepth = ($current.Split([char]92).Count) + 4
+    for ($depth = 0; $depth -lt $maxDepth -and -not [string]::IsNullOrWhiteSpace($current); $depth++) {
         if (Test-Path -LiteralPath $current) {
             # FAILS CLOSED. The previous version read attributes with
             # -ErrorAction SilentlyContinue and skipped the check when $item came
@@ -131,7 +142,7 @@ function Get-ReparseSegments {
     # than 64 components followed by a junction would have been accepted. A walk
     # that never reached the root is now REPORTED.
     if (-not $reachedRoot) {
-        $found.Add("<walk incomplete past 64 levels: " + $Path + ">")
+        $found.Add("<walk did not reach the filesystem root: " + $Path + ">")
     }
     return @($found)
 }
@@ -708,6 +719,84 @@ if ([string]::IsNullOrWhiteSpace($selfPath)) {
 # died before it could reach a verdict, which is NOT a verdict and must never be
 # read as one. A consumer must require status = "completed"; the presence of the
 # file has never meant success and now cannot be mistaken for it.
+function Write-EvidenceFile {
+    param(
+        [Parameter(Mandatory = $true)]$Evidence,
+        [AllowNull()][string]$Path
+    )
+
+    # ONE writer, used for the pending sentinel and for the final record, so both
+    # pass the same guards. Returns $true if it wrote, $false if it refused.
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $true
+    }
+    $parent = Split-Path -Parent $Path
+    if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent -PathType Container)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+    # THE EVIDENCE PATH GETS THE SAME REPARSE GUARD AS EVERY OTHER PATH. The
+    # account owns the tree it lives in, so making .director a junction
+    # redirected the write out of the permitted root while every other check
+    # still passed, because nothing inspected this path.
+    #
+    # THIS IS NOT ATOMIC AND IS NOT CLAIMED TO BE. The check happens, then the
+    # write happens, and the account can swap a directory for a junction in
+    # between. Both consulted CLIs were asked for a way to close that race on
+    # PowerShell 5.1 and neither found one worth taking: FILE_FLAG_OPEN_REPARSE_POINT
+    # opens the reparse object itself rather than refusing traversal, and a
+    # relative open through NtCreateFile's RootDirectory needs P/Invoke this
+    # script will not carry. The OpenAI CLI's preferred design is to move the
+    # evidence OUT of the account-owned tree entirely, to a directory the
+    # operator owns and the account may write into but not replace. That is the
+    # real fix and it is recorded in the ADR as the upgrade path, not done here.
+    $reparse = @(Get-ReparseSegments -Path $Path)
+    if ($reparse.Count -gt 0) {
+        Write-Output ("REFUSING to write evidence: its path traverses a reparse point and could " +
+            "be redirected outside the permitted root: " + ($reparse -join ", "))
+        return $false
+    }
+    # A DIRECTORY ON THE EVIDENCE PATH IS A DENIAL OF SERVICE, and the previous
+    # code walked into it: the existence test uses -PathType Leaf, which is FALSE
+    # for a directory, so the run proceeded and Set-Content threw.
+    #
+    # REFUSED, not removed. Deleting it would mean this script recursively
+    # removing something an adversary placed on a path it controls - a worse
+    # primitive than the problem. Both CLIs agreed independently.
+    if (Test-Path -LiteralPath $Path -PathType Container) {
+        Write-Output ("REFUSING to write evidence: a DIRECTORY occupies the evidence path " +
+            $Path + ". This script will not remove it - that would mean deleting a tree " +
+            "an adversary placed, on a path it controls. Remove it yourself and re-trigger.")
+        return $false
+    }
+    Set-Content -LiteralPath $Path -Value ($Evidence | ConvertTo-Json -Depth 6) -Encoding UTF8
+    return $true
+}
+
+# A PENDING SENTINEL IS WRITTEN FIRST, so a run that dies without throwing cannot
+# leave the PREVIOUS run's passing evidence in place to be read as this one's.
+# The try/catch below covers a wrapper that throws; it does not cover one that is
+# killed - an ExecutionTimeLimit expiry, or the process being terminated - and
+# that window is exactly where a stale "completed" gets misread.
+#
+# WHAT THIS STILL DOES NOT COVER, stated because the previous version of this
+# reasoning was too generous: a task that NEVER LAUNCHES writes nothing at all,
+# so whatever was on disk survives. Only the caller can close that, by
+# invalidating before triggering. register-exec-task.ps1 does it at registration
+# and the operator's trigger must do it per run. Freshness by timestamp alone is
+# not sufficient - the OpenAI CLI's point, and it is right: there is no trusted
+# per-run identifier in a fixed action.
+$pendingWritten = Write-EvidenceFile -Evidence ([ordered]@{
+        schema_version = "director.restricted-launch-evidence.v2"
+        ticket = 59
+        generated_utc = (Get-Date).ToUniversalTime().ToString("o")
+        status = "pending"
+        expected_sid = [string]$ExpectedSid
+        failures = @("this run started and has not finished; a reader seeing 'pending' must treat it as NO RESULT")
+    }) -Path $OutputPath
+if (-not $pendingWritten) {
+    exit 1
+}
+
 $evidence = $null
 try {
     $evidence = New-LaunchEvidence -Worktree $WorktreePath -Root $PermittedRoot -RequiredSid $ExpectedSid -WrapperPath $selfPath
@@ -715,26 +804,8 @@ try {
     $evidence = New-IncompleteEvidence -ErrorRecord $_ -RequiredSid $ExpectedSid
 }
 
-$json = $evidence | ConvertTo-Json -Depth 6
-if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
-    $parent = Split-Path -Parent $OutputPath
-    if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent -PathType Container)) {
-        New-Item -ItemType Directory -Path $parent -Force | Out-Null
-    }
-    # THE EVIDENCE PATH GETS THE SAME REPARSE GUARD AS EVERY OTHER PATH. It did
-    # not, and the account owns the tree it lives in: making .director a junction
-    # to somewhere else redirected Set-Content out of the permitted root while
-    # every other check still passed, because nothing ever inspected this path.
-    # Refusing to write is the correct failure - the run's exit code still
-    # reports the verdict, and a missing file now means something went wrong
-    # rather than nothing happening.
-    $outputReparse = @(Get-ReparseSegments -Path $OutputPath)
-    if ($outputReparse.Count -gt 0) {
-        Write-Output ("REFUSING to write evidence: its path traverses a reparse point and could " +
-            "be redirected outside the permitted root: " + ($outputReparse -join ", "))
-        exit 1
-    }
-    Set-Content -LiteralPath $OutputPath -Value $json -Encoding UTF8
+if (-not (Write-EvidenceFile -Evidence $evidence -Path $OutputPath)) {
+    exit 1
 }
-Write-Output $json
+Write-Output ($evidence | ConvertTo-Json -Depth 6)
 exit $(if ($evidence.status -eq "completed") { 0 } else { 1 })
