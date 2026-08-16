@@ -112,6 +112,17 @@ Acceptance for this mechanism is: a triggered run reports SID
 `wrapper_self_protection.wrapper_writable` and `.directory_writable` both false,
 measured by attempting the writes rather than reading an ACL.
 
+**Amended 2026-08-16, second amendment — that evidence is a self-report, not
+proof.** An adversarial review pointed out that the wrapper runs *as* the
+restricted account and writes its JSON into a directory that account controls,
+so an adversary already resident in the account can overwrite the file with a
+fabricated passing report. Accepted rather than papered over: a process cannot
+prove its own containment to an outside observer without trusted external
+infrastructure, which this repository does not have. The acceptance above is a
+check against **misconfiguration**, which it can address, and not against an
+**already-resident adversary**, which it cannot. Both scripts say so where an
+operator will read it.
+
 **Amended 2026-08-16.** This previously also required the run to come "from a
 process whose parent is the Task Scheduler service rather than the operator's
 shell". That criterion is **withdrawn, not weakened**: a process name is

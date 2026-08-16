@@ -80,8 +80,25 @@ function Get-ReparseSegments {
     # Bounded: a malformed path must not spin here.
     for ($depth = 0; $depth -lt 64 -and -not [string]::IsNullOrWhiteSpace($current); $depth++) {
         if (Test-Path -LiteralPath $current) {
-            $item = Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue
-            if ($null -ne $item -and $item.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) {
+            # FAILS CLOSED. The previous version read attributes with
+            # -ErrorAction SilentlyContinue and skipped the check when $item came
+            # back $null, so any segment whose attributes could not be read was
+            # silently accepted as an ordinary directory. An adversarial review
+            # called that a fail-open, and it was one. A segment that cannot be
+            # inspected is now REPORTED, which fails the caller's check.
+            #
+            # The reviewer's specific repro - the account denying itself
+            # FILE_READ_ATTRIBUTES while keeping traverse - was NOT reproduced:
+            # Get-Item on a directory this account cannot read into still
+            # returned the item and its attributes. The fail-open path was real
+            # whether or not that particular trigger is reachable.
+            $attributes = $null
+            try {
+                $attributes = [IO.File]::GetAttributes($current)
+            } catch {
+                $found.Add("<unreadable attributes: " + $current + ">")
+            }
+            if ($null -ne $attributes -and $attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) {
                 $found.Add($current)
             }
         }
@@ -163,6 +180,23 @@ function Test-SelfReplaceable {
         if ($typeName -notin @("UnauthorizedAccessException", "SecurityException")) {
             $result.inconclusive = $true
         }
+        # A READ-ONLY ATTRIBUTE IS NOT CONTAINMENT. Measured 2026-08-16: the DOS
+        # ReadOnly attribute throws the same UnauthorizedAccessException an ACL
+        # denial throws, AND the account that set it can strip it again. So an
+        # account WITH write access could set ReadOnly, let this report the
+        # wrapper protected, strip it, and rewrite the wrapper. Inconclusive,
+        # which fails the run. The attribute is read, never stripped: stripping
+        # it would mutate the thing being measured. Same fix as the sibling
+        # change in scripts/restricted-account-probe.ps1, same finding.
+        try {
+            if (([IO.File]::GetAttributes($WrapperPath)).HasFlag([IO.FileAttributes]::ReadOnly)) {
+                $result.inconclusive = $true
+                $result.wrapper_detail = "READONLY ATTRIBUTE SET, so the refusal cannot be attributed to the ACL: " + $result.wrapper_detail
+            }
+        } catch {
+            $result.inconclusive = $true
+            $result.wrapper_detail = "could not read the wrapper's attributes, so the refusal cannot be attributed: " + $result.wrapper_detail
+        }
     } finally {
         if ($null -ne $stream) { $stream.Dispose() }
     }
@@ -216,7 +250,17 @@ function Get-IdentityEvidence {
     # agrees with the evidence it will be read beside.
     $integrity = "unknown"
     try {
-        $labelLine = & whoami.exe /groups 2>$null | Select-String -Pattern "S-1-16-" | Select-Object -First 1
+        # ABSOLUTE PATH, not a bare name. The restricted account controls its own
+        # user PATH, so `& whoami.exe` would let it place a fake whoami.exe ahead
+        # of the real one and write whatever integrity level it liked into the
+        # evidence. Found by adversarial review. The hijack itself is not
+        # demonstrated here; a bare executable name in a security-relevant script
+        # has no defence either way.
+        $whoamiPath = Join-Path ([Environment]::GetFolderPath("System")) "whoami.exe"
+        if (-not (Test-Path -LiteralPath $whoamiPath -PathType Leaf)) {
+            throw "whoami.exe is not at its system path: $whoamiPath"
+        }
+        $labelLine = & $whoamiPath /groups 2>$null | Select-String -Pattern "S-1-16-" | Select-Object -First 1
         if ($null -ne $labelLine -and [string]$labelLine -match "S-1-16-(\d+)") {
             $integrity = switch ($Matches[1]) {
                 "0" { "untrusted" }
@@ -442,6 +486,41 @@ function Invoke-SelfTest {
         " | directory writable: " + ([string]$selfProtection.directory_writable).ToLowerInvariant() +
         " | inconclusive: " + ([string]$selfProtection.inconclusive).ToLowerInvariant() +
         " | " + $selfProtection.wrapper_detail)
+
+    # A READ-ONLY file must NOT be scored as protected. This is the masking
+    # attack the adversarial review found: set the attribute, let the check
+    # report the wrapper safe, strip the attribute, rewrite the wrapper. Both
+    # halves were measured on this machine - the attribute throws the same
+    # UnauthorizedAccessException an ACL denial throws, and the account that
+    # sets it can strip it again. Exercised against a file the self-test makes,
+    # so this does not depend on the machine or on elevation.
+    $roDirectory = Join-Path ([IO.Path]::GetTempPath()) ("director-ro-" + [guid]::NewGuid().ToString("N"))
+    $roFile = Join-Path $roDirectory "pretend-wrapper.ps1"
+    try {
+        New-Item -ItemType Directory -Path $roDirectory -Force | Out-Null
+        [IO.File]::WriteAllText($roFile, "# pretend wrapper")
+        [IO.File]::SetAttributes($roFile, [IO.FileAttributes]::ReadOnly)
+        $roVerdict = Test-SelfReplaceable -WrapperPath $roFile
+        if ($roVerdict.wrapper_writable) {
+            $failures.Add("a read-only file was reported writable, so the open-for-write probe is not measuring what it claims")
+        }
+        if (-not $roVerdict.inconclusive) {
+            $failures.Add("a READ-ONLY ATTRIBUTE was accepted as protection; the account that sets it can strip it again, so this is a false containment pass")
+        }
+        Write-Output ("self-test: read-only is not protection | writable: " + ([string]$roVerdict.wrapper_writable).ToLowerInvariant() +
+            " | inconclusive: " + ([string]$roVerdict.inconclusive).ToLowerInvariant() +
+            " | " + $roVerdict.wrapper_detail)
+    } finally {
+        if (Test-Path -LiteralPath $roFile -PathType Leaf) {
+            try { [IO.File]::SetAttributes($roFile, [IO.FileAttributes]::Normal) } catch { }
+        }
+        if (Test-Path -LiteralPath $roDirectory) {
+            Remove-Item -LiteralPath $roDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $roDirectory) {
+            $failures.Add("the read-only self-test could not remove its own temporary directory: " + $roDirectory)
+        }
+    }
 
     $evidence = New-LaunchEvidence -Worktree "" -Root "C:\Users\director-exec" -RequiredSid "" -WrapperPath $wrapperPath
     foreach ($field in @("schema_version", "identity", "identity_checks", "worktree", "wrapper_self_protection", "failures", "status")) {

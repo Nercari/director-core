@@ -96,8 +96,15 @@ function Get-ReparseSegments {
     }
     for ($depth = 0; $depth -lt 64 -and -not [string]::IsNullOrWhiteSpace($current); $depth++) {
         if (Test-Path -LiteralPath $current) {
-            $item = Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue
-            if ($null -ne $item -and $item.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) {
+            # Fails closed, same as the wrapper's copy: a segment whose
+            # attributes cannot be read is REPORTED, not skipped.
+            $attributes = $null
+            try {
+                $attributes = [IO.File]::GetAttributes($current)
+            } catch {
+                $found.Add("<unreadable attributes: " + $current + ">")
+            }
+            if ($null -ne $attributes -and $attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) {
                 $found.Add($current)
             }
         }
@@ -111,13 +118,32 @@ function Get-ReparseSegments {
 }
 
 function Test-PathWithinRoot {
+    # THE TWO COPIES HAD DIVERGED, and the adversarial review found it. This one
+    # was purely lexical while the wrapper's rejected reparse points, so
+    # Assert-WrapperOutsideExecutorTree could be defeated by a junction OUTSIDE
+    # the permitted root pointing INTO it: the string prefix said "outside",
+    # registration allowed it, and the wrapper was writable by the account after
+    # all. The reparse rejection is now in both.
+    #
+    # Still duplicated rather than shared. The Gemini CLI recommended extracting
+    # both guards into a security-utils.ps1 dot-sourced by each script, and its
+    # reasoning about the dot-source direction is right - sourcing the WRAPPER
+    # into the elevated registrar would run wrapper code elevated. But a third
+    # file for two functions is the kind of structure this repository adds only
+    # after a failure mode recurs, and divergence has now happened once.
+    # Recorded rather than built.
     param([string]$Candidate, [string]$Root)
     if ([string]::IsNullOrWhiteSpace($Candidate) -or [string]::IsNullOrWhiteSpace($Root)) {
         return $false
     }
     $c = ([IO.Path]::GetFullPath($Candidate)).TrimEnd("\").ToLowerInvariant()
     $r = ([IO.Path]::GetFullPath($Root)).TrimEnd("\").ToLowerInvariant()
-    return ($c -eq $r) -or $c.StartsWith($r + "\", [StringComparison]::Ordinal)
+    $lexicallyInside = ($c -eq $r) -or $c.StartsWith($r + "\", [StringComparison]::Ordinal)
+    if (-not $lexicallyInside) {
+        return $false
+    }
+    return (@(Get-ReparseSegments -Path $Candidate).Count -eq 0) -and
+           (@(Get-ReparseSegments -Path $Root).Count -eq 0)
 }
 
 function Assert-WrapperOutsideExecutorTree {
@@ -151,7 +177,24 @@ function Assert-WrapperOutsideExecutorTree {
     #
     # So registration refuses on structure, and the triggered run measures the
     # access. Neither claims to be the other.
-    if (Test-PathWithinRoot -Candidate $Wrapper -Root $Root) {
+    # THE REPARSE CHECK IS DONE HERE AND NOT DELEGATED, and the direction is the
+    # reason. Test-PathWithinRoot answers "is this INSIDE", and it fails closed
+    # by returning false when a reparse point is present - correct for the two
+    # callers that REQUIRE inside, wrong for this one, which requires OUTSIDE. A
+    # junction-laced path would have come back "false = outside = allowed",
+    # which is the exact bypass being closed. So the reparse rejection is
+    # applied explicitly, as its own refusal, before the containment question is
+    # asked at all.
+    $wrapperReparse = @(Get-ReparseSegments -Path $Wrapper)
+    $rootReparse = @(Get-ReparseSegments -Path $Root)
+    if ($wrapperReparse.Count -gt 0 -or $rootReparse.Count -gt 0) {
+        throw ("refusing to register: the wrapper path or the permitted root traverses a " +
+            "reparse point, so 'the wrapper is outside the account's tree' cannot be " +
+            "established by comparing them: " + (@($wrapperReparse + $rootReparse) -join ", "))
+    }
+    $wrapperFull = ([IO.Path]::GetFullPath($Wrapper)).TrimEnd("\").ToLowerInvariant()
+    $rootFull = ([IO.Path]::GetFullPath($Root)).TrimEnd("\").ToLowerInvariant()
+    if ($wrapperFull -eq $rootFull -or $wrapperFull.StartsWith($rootFull + "\", [StringComparison]::Ordinal)) {
         throw ("refusing to register: the wrapper at $Wrapper is inside the restricted " +
             "account's own tree ($Root), so that account can replace it and run its own " +
             "code with the task's blessing. Move the wrapper outside that tree.")
@@ -283,8 +326,20 @@ try {
     $administrators = @(Get-LocalGroupMember -SID "S-1-5-32-544" -ErrorAction Stop |
             ForEach-Object { [string]$_.SID.Value })
 } catch {
+    # FAILS CLOSED, deliberately, and the failure names its own workaround.
+    # Get-LocalGroupMember is known to throw on a group containing an
+    # unresolvable SID, which happens on domain-joined machines and after a
+    # local account is deleted. An adversarial review called that a permanent
+    # denial of service for this feature. It is an availability failure in the
+    # safe direction, and it did NOT reproduce here - the call returned two
+    # members cleanly on 2026-08-16 - so no fallback path is added for a failure
+    # mode that has occurred zero times. The message carries the manual check
+    # instead, so an operator who hits it is not stuck guessing.
     throw ("cannot read the local Administrators group, so it cannot be established that " +
-        "'$UserName' is not an administrator: " + [string]$_)
+        "'$UserName' is not an administrator: " + [string]$_ + [Environment]::NewLine +
+        "This is a known Get-LocalGroupMember failure when the group holds an unresolvable SID. " +
+        "Verify by hand with: net localgroup Administrators" + [Environment]::NewLine +
+        "Registration stays refused until it can be established, not waived.")
 }
 if ($administrators -contains $accountSid) {
     throw ("refusing to register: '$UserName' is a member of the local Administrators group. " +
@@ -339,7 +394,20 @@ $evidencePath = Join-Path $PermittedRoot ".director\launch-evidence.json"
 $arguments = Get-TaskActionArgument -Wrapper $WrapperPath -Root $PermittedRoot `
     -Worktree $WorktreePath -Sid $accountSid -Evidence $evidencePath
 
-$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arguments
+# ABSOLUTE PATH, not a bare name. Registering `-Execute "powershell.exe"` leaves
+# the binary to be resolved at trigger time by a search order this script does
+# not control, in a context where the restricted account controls its own user
+# PATH and possibly the working directory. The two consulted CLIs disagreed on
+# whether the bare-PATH hijack actually works - Gemini asserted that System32 is
+# searched before the user PATH but the WORKING DIRECTORY before System32, with
+# no citation and no probe; nothing here measured it. The disagreement does not
+# matter, because an absolute path removes the search entirely and costs one
+# line. Existence is checked rather than assumed.
+$powershellPath = Join-Path ([Environment]::GetFolderPath("System")) "WindowsPowerShell\v1.0\powershell.exe"
+if (-not (Test-Path -LiteralPath $powershellPath -PathType Leaf)) {
+    throw "powershell.exe is not at its system path, so the task action cannot be pinned to it: $powershellPath"
+}
+$action = New-ScheduledTaskAction -Execute $powershellPath -Argument $arguments
 # Review finding 3. LogonType was Interactive, which requires an existing
 # interactive logon session for the account - and the whole design triggers this
 # on demand while director-exec is not logged on. Password is the type for a
@@ -389,9 +457,17 @@ Write-Output ("  Start-ScheduledTask -TaskName " + $TaskName)
 Write-Output "then read the evidence at:"
 Write-Output ("  " + $evidencePath)
 Write-Output ""
-Write-Output "Registration proves nothing on its own. The claim is established only"
-Write-Output "when a triggered run reports:"
+Write-Output "Registration proves nothing on its own. A triggered run should report:"
 Write-Output ("  identity.sid = " + $accountSid)
 Write-Output "  wrapper_self_protection.wrapper_writable   = false"
 Write-Output "  wrapper_self_protection.directory_writable = false"
-Write-Output "identity.parent_process is DATA and establishes nothing on its own."
+Write-Output ""
+Write-Output "READ THAT FILE AS A SELF-REPORT, NOT AS PROOF. It is written by a"
+Write-Output "process running AS the restricted account, into a directory that"
+Write-Output "account controls, so that account can overwrite it with anything it"
+Write-Output "likes. An adversarial review raised this and it is accepted rather"
+Write-Output "than papered over: a process cannot prove its own containment to an"
+Write-Output "outside observer without external infrastructure this repository does"
+Write-Output "not have. The evidence is worth reading and is not worth trusting"
+Write-Output "against an adversary already resident in the account."
+Write-Output "identity.parent_process establishes nothing on its own either."
