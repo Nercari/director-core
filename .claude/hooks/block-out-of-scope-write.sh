@@ -58,9 +58,18 @@ esac
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo "")"
 if [ -n "$ROOT" ] && [ -f "$ROOT/.director/active-worktree" ]; then
   active="$(norm_path "$(tr -d '\r\n' < "$ROOT/.director/active-worktree")")"
+  root_norm="$(norm_path "$ROOT")"
   if [ -n "$active" ]; then
     case "$norm" in
     "$active"/*) exit 0 ;;
+    # The handoff is the one exception, and it has to be. require-handoff.sh
+    # reads it from the MAIN checkout and only enforces while a unit is in
+    # flight — which is exactly when this guard was denying it, so the cycle
+    # could not end and could not be made to end. A control whose precondition
+    # is the state that makes it unsatisfiable; see .director/failures.md,
+    # 2026-08-15. Scoped to that one gitignored runtime file: it is orchestrator
+    # cycle state, not source, and nothing else in the main checkout opens up.
+    "$root_norm"/.director/current-handoff.*) exit 0 ;;
     *) deny "write outside the active worktree ($active) — proposed: $norm" ;;
     esac
   fi
