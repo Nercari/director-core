@@ -783,6 +783,75 @@ function Invoke-GitCredentialProbe {
     }
 }
 
+function Get-ProfileWriteTargets {
+    # Issue #59, criterion 6. The forbidden set is DERIVED here rather than
+    # taken on trust from -ForbiddenWritePaths. Passing that switch was the only
+    # thing that put the operator's tree in scope, so omitting it silently
+    # shrank the probe to the machine roots and nothing noticed. It is now an
+    # ADDITION to this set, never a replacement.
+    #
+    # Measured on this machine 2026-08-16, which is what makes the derivation
+    # possible at all from a restricted account:
+    #   HKLM\...\CurrentVersion\ProfileList   BUILTIN\Users : ReadKey
+    #   ProfilesDirectory                     C:\Users
+    #   C:\Users                              BUILTIN\Users : ReadAndExecute
+    #   C:\Users\<operator>                   no Users or Everyone ACE at all
+    # The operator tree is discoverable BY NAME and unreadable BY CONTENT, so a
+    # restricted account can enumerate exactly the paths it must not be able to
+    # write without being able to read any of them.
+    $derived = New-Object System.Collections.Generic.List[string]
+    $profilesDirectory = ""
+    $errorText = ""
+    try {
+        $profilesDirectory = [Environment]::ExpandEnvironmentVariables(
+            [string](Get-ItemProperty `
+                    -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList" `
+                    -Name "ProfilesDirectory" -ErrorAction Stop).ProfilesDirectory
+        ).TrimEnd("\")
+        if ([string]::IsNullOrWhiteSpace($profilesDirectory)) {
+            throw "ProfilesDirectory is empty"
+        }
+        $derived.Add($profilesDirectory)
+
+        $ownProfile = [string][Environment]::GetEnvironmentVariable("USERPROFILE", "Process")
+        $ownLeaf = if ([string]::IsNullOrWhiteSpace($ownProfile)) {
+            ""
+        } else {
+            Split-Path -Leaf ($ownProfile.TrimEnd("\"))
+        }
+        foreach ($entry in @(Get-ChildItem -LiteralPath $profilesDirectory -Directory -Force -ErrorAction Stop)) {
+            # Junctions are not profiles. "All Users" resolves to ProgramData,
+            # which grants Users create-file BY DESIGN, so probing it would
+            # report a containment failure that is not one; "Default User"
+            # resolves to Default, already excluded below.
+            if ($entry.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) {
+                continue
+            }
+            # Public is shared by design and Default is a template. Neither is
+            # evidence about containment. The account's own profile is excluded
+            # for the reason the probe has always excluded it: it has to have a
+            # home and writing there is expected.
+            if (@("Public", "Default") -contains $entry.Name) {
+                continue
+            }
+            if (-not [string]::IsNullOrWhiteSpace($ownLeaf) -and $entry.Name -ieq $ownLeaf) {
+                continue
+            }
+            $derived.Add($entry.FullName)
+        }
+    } catch {
+        # A derivation that fails is not a pass. The caller turns this into a
+        # probe failure, because the alternative is a probe that quietly covers
+        # less than it claims - the exact fault this function exists to remove.
+        $errorText = Redact-Text ([string]$_)
+    }
+    return [ordered]@{
+        profiles_directory = $profilesDirectory
+        derived = @($derived)
+        error = $errorText
+    }
+}
+
 function Invoke-WriteBoundaryProbe {
     param(
         [string]$Repository,
@@ -819,6 +888,14 @@ function Invoke-WriteBoundaryProbe {
         $usersRoot = Split-Path -Parent ($profileRoot.TrimEnd("\"))
         if (-not [string]::IsNullOrWhiteSpace($usersRoot)) {
             $targets.Add($usersRoot)
+        }
+    }
+    # Every OTHER profile on the machine, derived rather than declared. The
+    # caller's -ForbiddenWritePaths is added on top of this, above.
+    $profileTargets = Get-ProfileWriteTargets
+    foreach ($candidate in $profileTargets.derived) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+            $targets.Add($candidate)
         }
     }
 
@@ -904,6 +981,10 @@ function Invoke-WriteBoundaryProbe {
         any_inconclusive = $anyInconclusive
         all_artifacts_removed = $allCleaned
         granted_worktree = $Repository
+        profiles_directory = [string]$profileTargets.profiles_directory
+        derived_profile_targets = @($profileTargets.derived)
+        derivation_error = [string]$profileTargets.error
+        target_source = "derived from the profile list, plus the machine roots, plus any -ForbiddenWritePaths the caller added"
         attempts = @($attempts)
     }
 }
@@ -1092,6 +1173,11 @@ function New-ProbeEvidence {
     if (-not $writeBoundary.executed) {
         $failures.Add("write-boundary probe did not run; criterion 6 cannot be claimed")
     } else {
+        if (-not [string]::IsNullOrWhiteSpace($writeBoundary.derivation_error)) {
+            $failures.Add("write-boundary targets could not be derived from the profile list: " +
+                $writeBoundary.derivation_error +
+                ". Coverage would silently fall back to the machine roots plus whatever -ForbiddenWritePaths happened to carry")
+        }
         $writable = @($writeBoundary.attempts | Where-Object { (-not $_.refused) -and (-not $_.inconclusive) } | ForEach-Object { $_.path })
         if ($writable.Count -gt 0) {
             $failures.Add("restricted account can write outside its granted worktree: " + ($writable -join ", "))
@@ -1363,6 +1449,42 @@ function Invoke-SelfTest {
     foreach ($attempt in $boundary.attempts) {
         Write-Output ("self-test: write boundary | path: " + $attempt.path + " | refused: " + ([string]$attempt.refused).ToLowerInvariant() + " | inconclusive: " + ([string]$attempt.inconclusive).ToLowerInvariant() + " | " + $attempt.detail + " | artifact removed: " + ([string]$attempt.artifact_removed).ToLowerInvariant())
     }
+
+    # The derived forbidden set, issue #59 criterion 6. What is asserted is the
+    # derivation, not the machine: that it ran, that it found the profile root,
+    # and that it excluded the three trees a restricted account may legitimately
+    # write - its own profile, Public, and Default. Asserting a particular
+    # neighbour profile exists would be asserting a property of this machine.
+    if (-not [string]::IsNullOrWhiteSpace($boundary.derivation_error)) {
+        $failures.Add("write-boundary target derivation failed: " + $boundary.derivation_error)
+    }
+    if ([string]::IsNullOrWhiteSpace($boundary.profiles_directory)) {
+        $failures.Add("write-boundary target derivation returned no profiles directory")
+    }
+    $ownProfileNormalised = ([string][Environment]::GetEnvironmentVariable("USERPROFILE", "Process")).TrimEnd("\")
+    $mustNotBeDerived = @($boundary.derived_profile_targets | Where-Object {
+            $leaf = Split-Path -Leaf ([string]$_).TrimEnd("\")
+            (@("Public", "Default") -contains $leaf) -or
+            (-not [string]::IsNullOrWhiteSpace($ownProfileNormalised) -and
+                ([string]$_).TrimEnd("\") -ieq $ownProfileNormalised)
+        })
+    if ($mustNotBeDerived.Count -gt 0) {
+        $failures.Add("derived forbidden set wrongly includes a tree that is writable by design: " + ($mustNotBeDerived -join ", "))
+    }
+    # Derivation takes no argument, so it cannot depend on
+    # -ForbiddenWritePaths - but being derived is worthless if the derived
+    # paths are never attempted. Every one of them must appear as an attempt.
+    # The probe is NOT run a second time to check this: a second run would
+    # write into every machine root and every neighbour profile again to prove
+    # something the attempt list already shows.
+    $attemptedPaths = @($boundary.attempts | ForEach-Object { ([string]$_.path).TrimEnd("\") })
+    $notAttempted = @($boundary.derived_profile_targets | Where-Object {
+            $attemptedPaths -notcontains ([string]$_).TrimEnd("\")
+        })
+    if ($notAttempted.Count -gt 0) {
+        $failures.Add("derived forbidden paths were never attempted: " + ($notAttempted -join ", "))
+    }
+    Write-Output ("self-test: derived forbidden set | profiles directory: " + $boundary.profiles_directory + " | derived: " + @($boundary.derived_profile_targets).Count + " | " + (@($boundary.derived_profile_targets) -join ", "))
     # No assertion for the empty-target case, and that absence is deliberate.
     # The three machine-wide roots are added unconditionally, so the target list
     # cannot be empty and the guard for it is unreachable belt-and-braces. An
