@@ -39,6 +39,22 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+# THE MODULE PATH IS PINNED TO THE SYSTEM DIRECTORY, BEFORE ANY CMDLET RUNS.
+# -NoProfile does not make an unqualified cmdlet name trustworthy. PowerShell
+# autoloads modules from every entry in PSModulePath, and a module can export a
+# command that shadows a built-in one; the restricted account controls its own
+# user module directory. The reviewer's concrete path: a shadowed Split-Path
+# that returns C:\Windows for the wrapper's parent would make the
+# self-protection probe measure C:\Windows, report directory_writable = false,
+# and complete - while the account could still replace the wrapper.
+#
+# Pinning the path is one line and removes the whole class, rather than
+# module-qualifying every call site and hoping none is missed later. Whether a
+# task-launched process inherits the account's user module path was the
+# reviewer's own stated inference and is NOT verified here; the fix does not
+# depend on it being true.
+$env:PSModulePath = Join-Path ([Environment]::GetFolderPath("System")) "WindowsPowerShell\v1.0\Modules"
+
 function Get-NormalisedPath {
     param([AllowNull()][string]$Path)
     if ([string]::IsNullOrWhiteSpace($Path)) {
@@ -72,6 +88,7 @@ function Get-ReparseSegments {
         return @($found)
     }
     $current = ""
+    $reachedRoot = $false
     try {
         $current = [IO.Path]::GetFullPath($Path).TrimEnd("\")
     } catch {
@@ -104,9 +121,17 @@ function Get-ReparseSegments {
         }
         $parent = Split-Path -Parent $current
         if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $current) {
+            $reachedRoot = $true
             break
         }
         $current = $parent
+    }
+    # THE BOUND ALSO FAILED OPEN. Stopping at 64 levels returned an empty list,
+    # indistinguishable from "walked the whole path and found nothing", so more
+    # than 64 components followed by a junction would have been accepted. A walk
+    # that never reached the root is now REPORTED.
+    if (-not $reachedRoot) {
+        $found.Add("<walk incomplete past 64 levels: " + $Path + ">")
     }
     return @($found)
 }
@@ -357,6 +382,18 @@ function New-LaunchEvidence {
     if ($identity.is_elevated) {
         $failures.Add("wrapper is running elevated; the restricted account must not be an administrator")
     }
+    # INTEGRITY IS NOW CHECKED, NOT JUST RECORDED. It was collected, printed, and
+    # never validated, so a run whose label could not be read at all reported
+    # status "completed". That is the same defect as recording a SID without
+    # requiring one, in a field that exists precisely to show the token is not
+    # privileged.
+    if ($identity.integrity_level -in @("unknown", "unavailable")) {
+        $failures.Add("integrity level could not be determined ('" + $identity.integrity_level +
+            "'), so this run cannot show it is unprivileged")
+    } elseif ($identity.integrity_level -notin @("low", "medium")) {
+        $failures.Add("integrity level is '" + $identity.integrity_level +
+            "'; the restricted account must run at low or medium")
+    }
 
     $selfProtection = Test-SelfReplaceable -WrapperPath $WrapperPath
     if ($selfProtection.inconclusive) {
@@ -585,6 +622,19 @@ if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
     $parent = Split-Path -Parent $OutputPath
     if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent -PathType Container)) {
         New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+    # THE EVIDENCE PATH GETS THE SAME REPARSE GUARD AS EVERY OTHER PATH. It did
+    # not, and the account owns the tree it lives in: making .director a junction
+    # to somewhere else redirected Set-Content out of the permitted root while
+    # every other check still passed, because nothing ever inspected this path.
+    # Refusing to write is the correct failure - the run's exit code still
+    # reports the verdict, and a missing file now means something went wrong
+    # rather than nothing happening.
+    $outputReparse = @(Get-ReparseSegments -Path $OutputPath)
+    if ($outputReparse.Count -gt 0) {
+        Write-Output ("REFUSING to write evidence: its path traverses a reparse point and could " +
+            "be redirected outside the permitted root: " + ($outputReparse -join ", "))
+        exit 1
     }
     Set-Content -LiteralPath $OutputPath -Value $json -Encoding UTF8
 }

@@ -92,7 +92,15 @@ and not deprecated.
   must be outside the tree the account owns — and the access itself is measured
   by the wrapper at trigger time, as the account, by opening itself for write.
   Registration refuses on structure; the triggered run measures the access.
-  Neither is claimed to be the other.
+  Neither is claimed to be the other. **Amended again after a second adversarial
+  pass:** that pair is still not a proof, and the sentence above was implying it
+  was. Outside the account's tree is *necessary, not sufficient* — nothing checks
+  whether the wrapper's own ACL grants the account `WRITE_DAC`, ownership, or
+  delete rights on its directory. And the trigger-time measurement is performed
+  *by the wrapper*, so if the account replaced the wrapper before the first
+  trigger, the measuring code is already the attacker's. A component cannot vouch
+  for itself. Both are properties of the deployment rather than of these scripts,
+  and neither is closed here.
 - Password rotation invalidates the stored task credential and requires
   re-registration. That is a feature: it fails closed and loudly.
 - The mechanism is recorded in the route registry rather than inferred from a

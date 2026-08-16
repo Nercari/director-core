@@ -43,7 +43,9 @@ param(
     # Baked in here, one fixed path, re-pointed by the operator between units.
     [string]$WorktreePath = "",
     [switch]$Verify,
-    [switch]$SelfTest
+    [switch]$SelfTest,
+    # Deliberate override for the ADR account pin below. Not a default.
+    [switch]$AllowOtherAccount
 )
 
 Set-StrictMode -Version Latest
@@ -78,6 +80,63 @@ function Get-TaskActionArgument {
     ) -join " "
 }
 
+function Get-SystemPowerShellPath {
+    # One resolver, used by BOTH the registered action and -SelfTest. They were
+    # separate, and drifted the moment the production path was pinned: the
+    # self-test kept a bare "powershell.exe" that resolves through the working
+    # directory. Same class of defect as the two copies of the path guard.
+    $path = Join-Path ([Environment]::GetFolderPath("System")) "WindowsPowerShell\v1.0\powershell.exe"
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "powershell.exe is not at its system path: $path"
+    }
+    return $path
+}
+
+function Get-RegisterParameterNames {
+    # The exact parameters the real Register-ScheduledTask call supplies. One
+    # source of truth, checked against the call itself at registration time and
+    # bind-checked against the live cmdlet by -SelfTest.
+    return @("TaskName", "Action", "Settings", "User", "Password", "RunLevel", "Force")
+}
+
+function Test-RegisterParametersBindToOneSet {
+    # THE CHECK THAT WOULD HAVE CAUGHT THE CRITICAL DEFECT. The previous version
+    # passed -Principal together with -User and -Password. Those live in
+    # different parameter sets, so binding failed before Task Scheduler was
+    # reached and the task could never register - and -SelfTest passed anyway,
+    # because it exited before that line and only ever checked argument shape.
+    #
+    # This asks the LIVE cmdlet whether the parameters actually used all fit in
+    # a single set. No registration, no elevation, no side effects, and it
+    # cannot go stale the way a comment can.
+    $names = Get-RegisterParameterNames
+    $command = Get-Command -Name "Register-ScheduledTask" -ErrorAction SilentlyContinue
+    if ($null -eq $command) {
+        return [ordered]@{
+            ok = $false
+            detail = "Register-ScheduledTask is not available, so its parameter sets cannot be checked"
+            sets = @()
+        }
+    }
+    $satisfying = @()
+    foreach ($set in $command.ParameterSets) {
+        $available = @($set.Parameters | ForEach-Object { [string]$_.Name })
+        $missing = @($names | Where-Object { $available -notcontains $_ })
+        if ($missing.Count -eq 0) {
+            $satisfying += [string]$set.Name
+        }
+    }
+    return [ordered]@{
+        ok = ($satisfying.Count -ge 1)
+        detail = $(if ($satisfying.Count -ge 1) {
+                "all parameters bind to set(s): " + ($satisfying -join ", ")
+            } else {
+                "no single parameter set of Register-ScheduledTask accepts all of: " + ($names -join ", ")
+            })
+        sets = @($satisfying)
+    }
+}
+
 function Get-ReparseSegments {
     # Same guard as the wrapper, for the same reason: a junction anywhere on
     # the path can redirect the tail outside the root. Duplicated rather than
@@ -89,6 +148,7 @@ function Get-ReparseSegments {
         return @($found)
     }
     $current = ""
+    $reachedRoot = $false
     try {
         $current = [IO.Path]::GetFullPath($Path).TrimEnd("\")
     } catch {
@@ -110,9 +170,17 @@ function Get-ReparseSegments {
         }
         $parent = Split-Path -Parent $current
         if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $current) {
+            $reachedRoot = $true
             break
         }
         $current = $parent
+    }
+    # THE BOUND FAILED OPEN. The loop stopped at 64 levels and returned an empty
+    # list, indistinguishable from "walked the whole path, found nothing" - so a
+    # path with more than 64 components followed by a junction would have been
+    # accepted. A walk that did not reach the root is now REPORTED.
+    if (-not $reachedRoot) {
+        $found.Add("<walk incomplete past 64 levels: " + $Path + ">")
     }
     return @($found)
 }
@@ -177,6 +245,25 @@ function Assert-WrapperOutsideExecutorTree {
     #
     # So registration refuses on structure, and the triggered run measures the
     # access. Neither claims to be the other.
+    #
+    # AND THAT PAIR IS STILL NOT A PROOF, which a second adversarial pass caught
+    # and the sentence above was quietly implying. Two gaps, both real:
+    #
+    #   1. Outside the account's tree is NECESSARY, not SUFFICIENT. This function
+    #      performs no ACL, owner, or privilege check, so a wrapper sitting
+    #      outside that tree while granting the account WRITE_DAC, ownership, or
+    #      delete rights on its directory passes here unremarked.
+    #   2. The trigger-time measurement is performed BY THE WRAPPER. If the
+    #      account replaced the wrapper before the first trigger, the code doing
+    #      the measuring is already the attacker's, and it will report whatever
+    #      it likes. A component cannot vouch for itself.
+    #
+    # No code change closes either one from here; both are properties of the
+    # deployment, not of this script. They are stated rather than implied, and
+    # the ADR now says the same. What this pair DOES establish is that the
+    # wrapper is not in the obvious place the account could trivially rewrite -
+    # a misconfiguration check, which is what the whole mechanism can honestly
+    # claim against an adversary that is not already resident.
     # THE REPARSE CHECK IS DONE HERE AND NOT DELEGATED, and the direction is the
     # reason. Test-PathWithinRoot answers "is this INSIDE", and it fails closed
     # by returning false when a reparse point is present - correct for the two
@@ -225,14 +312,29 @@ if ($SelfTest) {
     $worktree = Join-Path $root "wt"
     $evidencePath = Join-Path $root "launch-evidence.json"
     try {
+        # THE REGISTRATION CALL ITSELF, bind-checked. This is the assertion that
+        # would have caught the critical defect: the call used to mix -Principal
+        # with -User/-Password, which are mutually exclusive, so the task could
+        # never register while this self-test happily passed.
+        $binding = Test-RegisterParametersBindToOneSet
+        if (-not $binding.ok) {
+            $failures.Add("the registration call cannot bind: " + $binding.detail)
+        }
+        Write-Output ("self-test: registration parameter binding | " + $binding.detail)
+
         New-Item -ItemType Directory -Path $worktree -Force | Out-Null
         # A SID this process definitely is not, so a passing identity assertion
         # here would mean the assertion is not enforcing.
         $arguments = Get-TaskActionArgument -Wrapper $WrapperPath -Root $root `
             -Worktree $worktree -Sid "S-1-5-18" -Evidence $evidencePath
-        Write-Output ("self-test: registered action | powershell.exe " + $arguments)
+        # THE SAME ABSOLUTE PATH THE REAL TASK USES. This said "powershell.exe"
+        # while production had already been pinned to the system path, so the
+        # self-test resolved through the working directory - the more reachable
+        # of the two - and did not exercise what actually runs.
+        $shell = Get-SystemPowerShellPath
+        Write-Output ("self-test: registered action | " + $shell + " " + $arguments)
 
-        $process = Start-Process -FilePath "powershell.exe" -ArgumentList $arguments `
+        $process = Start-Process -FilePath $shell -ArgumentList $arguments `
             -NoNewWindow -Wait -PassThru
         Write-Output ("self-test: triggered action exit code | " + $process.ExitCode)
 
@@ -272,6 +374,36 @@ if ($SelfTest) {
                 " | sid matched: " + ([string]$evidence.identity_checks.sid_matches_expected).ToLowerInvariant())
             Write-Output ("self-test: action failures | " + $failureText)
         }
+
+        # THE POSITIVE PATH. Every assertion above is a rejection, and a wrapper
+        # that rejected EVERYTHING would satisfy all of them - the reviewer gave
+        # the exact counterexample. So the action is run once more with this
+        # process's real SID, and the identity check must ACCEPT it.
+        #
+        # Note what is and is not asserted. `status: completed` is NOT required:
+        # the wrapper is writable by the operator running this, so its
+        # self-protection check correctly reports a failure here. What must hold
+        # is that the SID check flips to true and stops contributing a failure.
+        $ownSid = [string]([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+        $positiveEvidence = Join-Path $root "launch-evidence-positive.json"
+        $positiveArguments = Get-TaskActionArgument -Wrapper $WrapperPath -Root $root `
+            -Worktree $worktree -Sid $ownSid -Evidence $positiveEvidence
+        Start-Process -FilePath $shell -ArgumentList $positiveArguments -NoNewWindow -Wait | Out-Null
+        if (-not (Test-Path -LiteralPath $positiveEvidence -PathType Leaf)) {
+            $failures.Add("the positive-path run wrote no evidence file")
+        } else {
+            $positive = Get-Content -LiteralPath $positiveEvidence -Raw | ConvertFrom-Json
+            $positiveFailures = (@($positive.failures) -join "; ")
+            if (-not $positive.identity_checks.sid_matches_expected) {
+                $failures.Add("the wrapper REJECTED this process's own SID; the identity check refuses everything and would reject the restricted account too")
+            }
+            if ($positiveFailures.Contains("not the required")) {
+                $failures.Add("a SID mismatch was reported for the correct SID")
+            }
+            Write-Output ("self-test: positive path | required " + $ownSid +
+                " | sid matched: " + ([string]$positive.identity_checks.sid_matches_expected).ToLowerInvariant() +
+                " | remaining failures: " + $positiveFailures)
+        }
     } finally {
         if (Test-Path -LiteralPath $root) {
             Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
@@ -310,6 +442,22 @@ if ($Verify) {
 
 if (-not (Test-Elevated)) {
     throw "registration requires an elevated session. Triggering the task afterwards does not."
+}
+
+# THE ACCOUNT IS PINNED. -UserName was a free parameter, so an elevated caller
+# could point the whole mechanism at any other non-administrator local account:
+# the script would compute that account's SID and profile, build the action
+# around it, and register a task the ADR does not describe. The ADR is about one
+# account. Overriding it is possible but must be deliberate and visible in the
+# command line, not a default that silently drifts.
+$adrAccount = "director-exec"
+if ($UserName -ine $adrAccount -and -not $AllowOtherAccount) {
+    throw ("refusing to register for '$UserName': ADR 0001 specifies '$adrAccount'. " +
+        "Pass -AllowOtherAccount to override deliberately; every claim in the ADR and in " +
+        "the evidence is about '$adrAccount' and does not transfer to another account.")
+}
+if ($UserName -ine $adrAccount) {
+    Write-Output ("WARNING: registering for '$UserName', which is NOT the ADR account '$adrAccount'.")
 }
 
 $account = Get-LocalUser -Name $UserName -ErrorAction SilentlyContinue
@@ -391,6 +539,16 @@ Write-Output ("registering for " + $UserName + " (SID " + $accountSid + ")")
 # The evidence path lives under the restricted account's own profile, because
 # that is a place it can write and the operator can read.
 $evidencePath = Join-Path $PermittedRoot ".director\launch-evidence.json"
+# STALE EVIDENCE READS AS CURRENT. Start-ScheduledTask is asynchronous, so it
+# returns before the wrapper has written anything; if a previous run left a
+# passing file and the new run fails before reaching the wrapper, the operator
+# reads the old file and believes it. Any existing file is removed HERE, at
+# registration, so its absence afterwards is itself informative: no file means
+# the wrapper never ran. The wrapper stamps generated_utc for the same reason.
+if (Test-Path -LiteralPath $evidencePath -PathType Leaf) {
+    Remove-Item -LiteralPath $evidencePath -Force -ErrorAction Stop
+    Write-Output ("removed stale evidence at " + $evidencePath)
+}
 $arguments = Get-TaskActionArgument -Wrapper $WrapperPath -Root $PermittedRoot `
     -Worktree $WorktreePath -Sid $accountSid -Evidence $evidencePath
 
@@ -403,11 +561,7 @@ $arguments = Get-TaskActionArgument -Wrapper $WrapperPath -Root $PermittedRoot `
 # no citation and no probe; nothing here measured it. The disagreement does not
 # matter, because an absolute path removes the search entirely and costs one
 # line. Existence is checked rather than assumed.
-$powershellPath = Join-Path ([Environment]::GetFolderPath("System")) "WindowsPowerShell\v1.0\powershell.exe"
-if (-not (Test-Path -LiteralPath $powershellPath -PathType Leaf)) {
-    throw "powershell.exe is not at its system path, so the task action cannot be pinned to it: $powershellPath"
-}
-$action = New-ScheduledTaskAction -Execute $powershellPath -Argument $arguments
+$action = New-ScheduledTaskAction -Execute (Get-SystemPowerShellPath) -Argument $arguments
 # Review finding 3. LogonType was Interactive, which requires an existing
 # interactive logon session for the account - and the whole design triggers this
 # on demand while director-exec is not logged on. Password is the type for a
@@ -424,7 +578,33 @@ $action = New-ScheduledTaskAction -Execute $powershellPath -Argument $arguments
 # been measured on this machine, because registration needs elevation.
 # RunLevel Limited: the restricted account must never be elevated, and the
 # wrapper fails closed if it finds itself elevated anyway.
-$principal = New-ScheduledTaskPrincipal -UserId $UserName -LogonType Password -RunLevel Limited
+#
+# NO New-ScheduledTaskPrincipal. THE TASK COULD NEVER HAVE REGISTERED WITH ONE.
+# A second independent adversarial pass found that the call below combined
+# -Principal with -User/-Password, which belong to MUTUALLY EXCLUSIVE parameter
+# sets, so binding failed before Task Scheduler was ever reached. Measured on
+# this machine rather than taken from the review:
+#
+#   PS> (Get-Command Register-ScheduledTask).ParameterSets
+#   User       ->  Force, Password, User, TaskName, TaskPath, Action,
+#                  Description, Settings, Trigger, RunLevel
+#   Principal  ->  Force, TaskName, TaskPath, Principal, Action,
+#                  Description, Settings, Trigger
+#
+# The User set carries RunLevel and the Principal set carries no credential, so
+# the User set is the only one that can express "run as this account, with this
+# password, unelevated". The principal object is gone.
+#
+# This is the SECOND way this mechanism could never have run, found by the
+# SECOND independent pass. The first was a missing -WorktreePath. Both were
+# invisible to a self-test that asserted argument shape instead of executing the
+# thing, which is why the self-test below now runs the real call.
+#
+# LOGON TYPE IS NOW IMPLICIT, and that is a real reduction in what this script
+# states. Supplying -Password is what selects a password logon; nothing here
+# names LogonType any more, and nothing here can confirm what Windows recorded.
+# The -Verify path prints the registered LogonType so an operator can read it
+# back. Expect Password; if it says something else, that is a finding.
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
 
 Write-Output "Enter the password for $UserName. It is passed to Windows for this"
@@ -439,8 +619,27 @@ try {
     $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
     try {
         $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-        Register-ScheduledTask -TaskName $TaskName -Action $action -Principal $principal `
-            -Settings $settings -User $UserName -Password $plain -Force | Out-Null
+        # SPLATTED so the self-test can bind-check the exact same parameter set
+        # without registering anything. Get-RegisterParameterNames is the single
+        # source of truth for which parameters this call uses.
+        $registerArguments = @{
+            TaskName = $TaskName
+            Action   = $action
+            Settings = $settings
+            User     = $UserName
+            Password = $plain
+            RunLevel = "Limited"
+            Force    = $true
+        }
+        foreach ($name in (Get-RegisterParameterNames)) {
+            if (-not $registerArguments.ContainsKey($name)) {
+                throw "internal: Get-RegisterParameterNames lists '$name' but the call does not supply it"
+            }
+        }
+        if ($registerArguments.Count -ne (Get-RegisterParameterNames).Count) {
+            throw "internal: the registration call and Get-RegisterParameterNames have drifted apart"
+        }
+        Register-ScheduledTask @registerArguments | Out-Null
     } finally {
         [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
     }
@@ -456,6 +655,10 @@ Write-Output "Trigger it, unelevated, with:"
 Write-Output ("  Start-ScheduledTask -TaskName " + $TaskName)
 Write-Output "then read the evidence at:"
 Write-Output ("  " + $evidencePath)
+Write-Output ""
+Write-Output "Start-ScheduledTask returns BEFORE the wrapper writes. Any stale evidence"
+Write-Output "was deleted just now, so if no file appears, the wrapper did not run - do"
+Write-Output "not read an older passing file as this run. Check generated_utc."
 Write-Output ""
 Write-Output "Registration proves nothing on its own. A triggered run should report:"
 Write-Output ("  identity.sid = " + $accountSid)
