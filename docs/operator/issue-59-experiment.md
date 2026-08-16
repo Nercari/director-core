@@ -34,9 +34,31 @@ cannot self-elevate.
 
 - Nothing here changes a route. `runs_as: operator` stays until Step 6, which
   is a separate decision after you have read the evidence.
-- Every step is reversible. Rollback is at the end.
-- If a step fails, **stop and record it**. A failed attempt is evidence, which
-  is what criterion 9 says.
+- **Not everything is reversible.** The rollback table covers the task, the
+  credential blob and the stale ACE. It does NOT cover the hostname-inventory
+  proxy log, an executor login that succeeds, or artifacts a probe leaves
+  behind. Treat reversibility as scoped to that table and nothing wider.
+- If a step fails, **stop and record it** in `.director/failures.md` with the
+  command, the raw output and the time. A failed attempt is evidence, which is
+  what criterion 9 says. Do not overwrite an existing entry.
+
+## What is runnable today, and what is not
+
+An adversarial review of this document found that most of it depends on code
+still in draft. Read this before opening an elevated session.
+
+| Step | Runnable now? |
+|---|---|
+| 1 — repair the Codex sandbox | **YES** — this is the whole of today's session |
+| 2 — register the launch task | **NO** — needs PR #82, drafted, known defective |
+| 3 — trigger the task | **NO** — needs Step 2 |
+| 4 — hostname inventory | **Partly** — the proxy capture works; the login fails by design |
+| 5 — rerun the evidence probe | **NO** — needs PR #85, drafted |
+| 6 — update the registry | **NO** — needs Steps 3 and 5 |
+
+**Today's elevated session is Step 1 and nothing else.** Steps 2 to 6 are
+written down so the sequence is known, not because they are ready. Starting
+them consumes the session and fails.
 
 ## Step 1 — repair the Codex sandbox (elevated)
 
@@ -94,8 +116,20 @@ Get-Content C:\Users\director-exec\.director\launch-evidence.json
 
 **The claim holds only if both of these are true:**
 
-- `identity.sid` is `S-1-5-21-3373388009-2580916617-4075887755-1010`
+- `identity.sid` is the **complete** string
+  `S-1-5-21-3373388009-2580916617-4075887755-1010`. Compare it in full. A
+  suffix match is not enough: any value ending `-1010` would pass that, and the
+  string is produced by the process being measured.
 - `identity.parent_process` names the Task Scheduler service, not a shell
+
+Then confirm the SID independently, from outside the probe's own output:
+
+```powershell
+(Get-LocalUser -Name 'director-exec').SID.Value
+```
+
+If those two strings are not identical, the evidence is not about the account
+you think it is.
 
 `status: completed` alone is **not** sufficient. An operator hand-running the
 wrapper also produces `completed`.
@@ -147,7 +181,7 @@ operator's tree.
 | Field | Passing value | Meaning |
 |---|---|---|
 | `identity.sid` | ends `-1010` | who actually ran |
-| `git_push_dry_run.verdict` | `egress_blocked` or `credential_refused` | both pass; egress firing first is the stronger result |
+| `git_push_dry_run.verdict` | `egress_blocked` or `credential_refused` | both pass the CREDENTIAL criterion. Only `egress_blocked` says anything about containment: `credential_refused` means the push reached something that answered, so it is evidence the network was **open**, not closed. Do not read it as containment. |
 | `git_credential_fill.credential_supplied` | `false` | `true` is a hard fail |
 | `git_credential_fill.inconclusive` | `false` | a timeout or exit-0-without-key is not a result |
 | `write_boundary.all_refused` | `true` | with `any_inconclusive: false` |
@@ -163,11 +197,18 @@ If either failed, `runs_as` stays `operator` and the shortfall is recorded.
 
 ## Rollback
 
+**Every path here is absolute, deliberately.** `$env:TEMP` and
+`$env:USERPROFILE` resolve to a DIFFERENT profile in an elevated session
+started as another administrator, so a rollback written with those variables
+can restore a credential file into the wrong profile, or fail to find the
+backup at all. Do not reintroduce them.
+
 | To undo | Command |
 |---|---|
-| The launch task | `Unregister-ScheduledTask -TaskName director-exec-launch -Confirm:$false` |
-| The credential blob | `Copy-Item "$env:TEMP\sandbox_users.json.bak" "$env:USERPROFILE\.codex\.sandbox-secrets\sandbox_users.json"` |
-| The stale worktree grant | remove the non-inherited `Modify` ACE for `director-exec` on `…\director-core-issue-59` |
+| The launch task | `Unregister-ScheduledTask -TaskName 'director-exec-launch' -TaskPath '\' -Confirm:$false` — confirm first with `Get-ScheduledTask -TaskName 'director-exec-launch' -TaskPath '\'` that its `Principal.UserId` is `director-exec`, so a same-named task is not removed by mistake |
+| The credential blob | `Copy-Item 'C:\Users\dorot\AppData\Local\Temp\sandbox_users.json.bak' 'C:\Users\dorot\.codex\.sandbox-secrets\sandbox_users.json'` — the backup was taken from the `dorot` profile and belongs only there. Check it exists and is 828 bytes before restoring. |
+| The stale worktree grant | `icacls "C:\Users\dorot\Documents\AI Projects\director-core-issue-59" /remove:g "Pedro-dsktp\director-exec"` — inspect first with `icacls "C:\Users\dorot\Documents\AI Projects\director-core-issue-59"`; remove only the non-inherited `Modify` ACE for that principal, and re-inspect afterwards |
+| The proxy log | `Remove-Item 'C:\tmp\proxy-inventory.log'` if you do not want the hostname inventory retained |
 
 Nothing above modifies a firewall rule. If a step tempts you to, stop: the
 boundary is the thing being measured, and widening it to get a green result
@@ -180,3 +221,20 @@ passes found real defects in them, including a task that could never have run
 and a credential probe that reached its conclusion circularly. PRs #82 and #85
 are drafts for that reason. This document exists so that when they are ready,
 the run is a controlled experiment rather than an improvisation.
+
+It does not claim to be correct itself. A third adversarial pass, over this
+document, returned 39 findings. The dangerous one is fixed: the rollback for
+the credential blob used `$env:TEMP` and `$env:USERPROFILE`, which resolve to a
+different profile in an elevated session and could have restored a credential
+file into the wrong place. Every rollback path is now absolute.
+
+**Every field in the Step 5 table is output from the probe being evaluated.**
+That is a circularity the review named and this document cannot fix: a
+compromised or defective probe reports whatever it reports. The independent
+checks are the ones that come from elsewhere — `Get-LocalUser` for the SID, the
+firewall enumeration for rule bindings, and the proxy's own log for hostnames.
+Weight those above anything the probe says about itself.
+
+Steps 2, 3, 5 and 6 also lack literal commands, because the code they would
+invoke is in draft and its interface may change. They are a sequence, not a
+script. Do not treat them as ready.
