@@ -212,6 +212,49 @@ if ((Get-AccountLeaf $ownerAfterScope) -ine $accountLeaf) {
     throw "proof clone owner mismatch after scoped ownership change: $ownerAfterScope"
 }
 
+# THE GRANT ABOVE HANDED THE EXECUTOR MODIFY ON THE PROBE THAT JUDGES IT.
+# Recorded 2026-08-15: the restricted account received Modify on the whole
+# clone, scripts\ included, so it could have rewritten
+# restricted-account-probe.ps1 to report anything at all. Every other result
+# the probe produces is worth nothing until that is closed.
+#
+# Ownership of scripts\ goes BACK to Administrators, and that is the load-
+# bearing half. A deny ACE alone would not have held: /setowner above made the
+# restricted account the owner of every object in the tree, and an owner always
+# retains WRITE_DAC, so it could simply have rewritten the ACL that denied it.
+# The probe's own owner check reads the clone ROOT, which still belongs to the
+# restricted account, so this does not disturb it.
+#
+# A DENY rather than removing the grant, and that choice was measured. The M
+# grant reaches scripts\ twice - inherited from the clone root and stamped
+# explicitly by /T - so removing it takes both /inheritance:r and /remove:g.
+# Run on a scratch tree 2026-08-16, /inheritance:r stripped the inherited ACEs
+# that were the OPERATOR's only access to scripts\, and every icacls call after
+# it failed with "Access is denied" on a directory the operator still owned.
+# The deny leaves inheritance alone, and icacls splits the existing explicit
+# grant into DENY(write bits) + ALLOW(RX), so the account keeps exactly the read
+# and execute it needs to run the probe. Rights are named individually rather
+# than as the simple W and D, and principals by SID, so neither depends on
+# icacls shorthand or on the machine's display language.
+$scriptsPath = Join-Path $target "scripts"
+$administratorsSid = "*S-1-5-32-544"
+Invoke-Icacls -Arguments @(
+    $scriptsPath,
+    "/deny", "${UserName}:(OI)(CI)(WD,AD,WEA,WA,DE,DC,WDAC,WO)",
+    "/T", "/C"
+) | Out-Null
+Invoke-Icacls -Arguments @($scriptsPath, "/setowner", $administratorsSid, "/T", "/C") | Out-Null
+$scriptsOwner = [string](Get-Acl -LiteralPath $scriptsPath -ErrorAction Stop).Owner
+if ((Get-AccountLeaf $scriptsOwner) -ieq $accountLeaf) {
+    throw "scripts directory is still owned by the restricted account, which can therefore rewrite its own ACL: $scriptsOwner"
+}
+# NOT verified here, deliberately. This process runs as the operator, so
+# anything it measures is a statement about the operator's access. Whether the
+# restricted account can actually open these files for writing is measured by
+# the restricted account, inside restricted-account-probe.ps1, by opening each
+# one with FileMode.Open. A configuration excerpt is not proof anywhere else in
+# this experiment and it is not proof here.
+
 $childScriptPath = Join-Path $target "scripts\run-restricted-account-probe.ps1"
 foreach ($requiredPath in @(
     $childScriptPath,

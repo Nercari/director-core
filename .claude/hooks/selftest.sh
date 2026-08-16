@@ -463,6 +463,15 @@ ACTIVE_ROOT="$ROOT/.selftest-active-worktree"
 printf '%s\n' "$ACTIVE_ROOT" > "$ACTIVE_FILE"
 expect_block "outside active worktree" block-out-of-scope-write.sh "$(file_path "$ROOT/outside-active-worktree.txt")"
 expect_allow "inside active worktree"  block-out-of-scope-write.sh "$(file_path "$ACTIVE_ROOT/inside.txt")"
+# The handoff exemption. Without it require-handoff.sh cannot be satisfied while
+# a unit is in flight, which is the only time it enforces. The exemption is one
+# file, so the two cases either side of it must stay blocked.
+expect_allow "handoff in main checkout during a unit" \
+  block-out-of-scope-write.sh "$(file_path "$ROOT/.director/current-handoff.json")"
+expect_block "other .director file in main checkout" \
+  block-out-of-scope-write.sh "$(file_path "$ROOT/.director/routes.yaml")"
+expect_block "handoff-named file outside .director" \
+  block-out-of-scope-write.sh "$(file_path "$ROOT/current-handoff.json")"
 rm -f "$HANDOFF_FILE"
 expect_block "missing handoff in active cycle" require-handoff.sh '{}'
 

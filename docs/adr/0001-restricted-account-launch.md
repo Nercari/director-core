@@ -3,6 +3,15 @@
 Status: accepted, 2026-08-15. Supersedes nothing.
 Context: issue [#59](https://github.com/Nercari/director-core/issues/59), criterion 3.
 
+**Implementation is deliberately not part of this record.** The first attempt at
+the two scripts was written under declared self-review, and an adversarial
+cross-vendor pass then found critical defects in both: the registered task
+omitted the worktree argument, so every triggered run would have failed; the
+wrapper never asserted the running SID; and the ACL guard matched identity by
+substring instead of querying effective access. Those scripts are drafted
+pending rework. The decision below survived that review unchanged, which is why
+it is recorded separately from the code that will implement it.
+
 ## The gap
 
 `scripts/exec-jail.sh` is 75 lines and contains no account switch. It empties
@@ -84,23 +93,8 @@ and not deprecated.
   is a human action by design.
 - The task definition and its action script become security-relevant files. If
   the executor can modify the wrapper, it can run its own code as the account.
-  The wrapper must live where the executor cannot write. **Amended 2026-08-16**:
-  this originally said the registration "must set an ACL that enforces it", and
-  the first implementation tried to, with an ACE-string check that missed group
-  membership, ownership, deny precedence, inheritance, and the containing
-  directory. Registration now enforces the **structural** property — the wrapper
-  must be outside the tree the account owns — and the access itself is measured
-  by the wrapper at trigger time, as the account, by opening itself for write.
-  Registration refuses on structure; the triggered run measures the access.
-  Neither is claimed to be the other. **Amended again after a second adversarial
-  pass:** that pair is still not a proof, and the sentence above was implying it
-  was. Outside the account's tree is *necessary, not sufficient* — nothing checks
-  whether the wrapper's own ACL grants the account `WRITE_DAC`, ownership, or
-  delete rights on its directory. And the trigger-time measurement is performed
-  *by the wrapper*, so if the account replaced the wrapper before the first
-  trigger, the measuring code is already the attacker's. A component cannot vouch
-  for itself. Both are properties of the deployment rather than of these scripts,
-  and neither is closed here.
+  The wrapper must live where the executor cannot write, and the registration
+  must set an ACL that enforces it.
 - Password rotation invalidates the stored task credential and requires
   re-registration. That is a feature: it fails closed and loudly.
 - The mechanism is recorded in the route registry rather than inferred from a
@@ -116,52 +110,9 @@ agent's prose as evidence, and a logon record is not proof of the executing
 identity either.
 
 Acceptance for this mechanism is: a triggered run reports SID
-`S-1-5-21-3373388009-2580916617-4075887755-1010`, and reports
-`wrapper_self_protection.wrapper_writable` and `.directory_writable` both false,
-measured by attempting the writes rather than reading an ACL.
-
-**Amended 2026-08-16, third amendment — the evidence path has an unclosed race,
-and the fix is a relocation nobody has done yet.** The wrapper checks the
-evidence path for reparse points and then writes to it; the account owns that
-tree and can swap a directory for a junction in between. Both consulted CLIs
-were asked for a way to close this on PowerShell 5.1 and neither found one worth
-taking — `FILE_FLAG_OPEN_REPARSE_POINT` opens the reparse object rather than
-refusing traversal, and a relative open via `NtCreateFile`'s `RootDirectory`
-needs P/Invoke these scripts will not carry. **The real fix is to move the
-evidence out of the account-owned tree**, into a directory the operator owns
-where the account may write a file but cannot replace the directory entry. That
-is the upgrade path. Until it is done, the reparse check is a misconfiguration
-guard and is not atomic, and nothing here should describe it as one.
-
-A related limit, stated because it is easy to over-claim: a run that dies
-without throwing now leaves a `pending` record rather than the previous run's
-verdict, but a task that **never launches** writes nothing at all, so whatever
-was on disk survives. Only the caller can close that, by invalidating before
-triggering. Timestamp freshness alone is not sufficient — a fixed action carries
-no trusted per-run identifier.
-
-**Amended 2026-08-16, second amendment — that evidence is a self-report, not
-proof.** An adversarial review pointed out that the wrapper runs *as* the
-restricted account and writes its JSON into a directory that account controls,
-so an adversary already resident in the account can overwrite the file with a
-fabricated passing report. Accepted rather than papered over: a process cannot
-prove its own containment to an outside observer without trusted external
-infrastructure, which this repository does not have. The acceptance above is a
-check against **misconfiguration**, which it can address, and not against an
-**already-resident adversary**, which it cannot. Both scripts say so where an
-operator will read it.
-
-**Amended 2026-08-16.** This previously also required the run to come "from a
-process whose parent is the Task Scheduler service rather than the operator's
-shell". That criterion is **withdrawn, not weakened**: a process name is
-trivially reproducible, and nothing inside a process can establish its own
-provenance. The scheduler's own
-`Microsoft-Windows-TaskScheduler/Operational` channel would be external evidence
-and therefore stronger, but `wevtutil gl` reports it `enabled: false` on this
-machine, so it records nothing to correlate against. An operator who wants
-provenance must enable that channel first; its `channelAccess` already grants
-`BATCH` read, `(A;;0x3;;;S-1-5-3)`, so a task-triggered run could read it.
-Nothing in this ADR depends on that.
+`S-1-5-21-3373388009-2580916617-4075887755-1010`, from a process whose parent is
+the Task Scheduler service rather than the operator's shell, with the executor
+unable to modify the wrapper it ran from.
 
 ## What this ADR deliberately does not decide
 
