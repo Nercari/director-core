@@ -10,17 +10,26 @@
 # task that runs an arbitrary command line as director-exec is not a containment
 # mechanism, it is a privilege-launch mechanism for anyone able to trigger it.
 #
-# Its job right now is to report WHICH ACCOUNT ACTUALLY RAN IT. The process
-# reports its own token rather than the caller reporting what it intended, which
-# is what criterion 4 asks for and what a logon record cannot establish.
-# Executor invocation is deliberately not wired in yet: the identity transition
-# is proven first, on its own, or the proof is contaminated by whatever the
-# executor does.
+# Its job right now is to report WHICH ACCOUNT ACTUALLY RAN IT, and to REFUSE if
+# that is not the expected account. Executor invocation is deliberately not
+# wired in yet: the identity transition is proven first, on its own, or the
+# proof is contaminated by whatever the executor does.
+#
+# REWORKED after an adversarial cross-vendor review of PR #82 found ten defects.
+# Three of them are answered here by redesign rather than patched. See the block
+# comments on Get-ReparseSegments, Test-SelfReplaceable, and the parent_process
+# field in Get-IdentityEvidence.
 [CmdletBinding()]
 param(
     [switch]$SelfTest,
     [string]$WorktreePath,
     [string]$OutputPath,
+    # REQUIRED for a real run. Review finding 2: the previous wrapper RECORDED
+    # its SID and required nothing of it, so an operator hand-running it with a
+    # valid worktree produced status "completed". Recording is not enforcing.
+    # An account NAME is not accepted here, for the reason the restricted
+    # account probe already refuses one: names are not authoritative, SIDs are.
+    [string]$ExpectedSid,
     # The only tree this account may be pointed at. A worktree outside it is
     # refused rather than measured, because measuring it would normalise the
     # thing the boundary exists to prevent.
@@ -38,6 +47,53 @@ function Get-NormalisedPath {
     return ([IO.Path]::GetFullPath($Path)).TrimEnd("\").ToLowerInvariant()
 }
 
+function Get-ReparseSegments {
+    param([AllowNull()][string]$Path)
+
+    # Review finding 5. The old guard was lexical only, so a junction at
+    # C:\Users\director-exec\wt pointing at C:\Users\dorot normalised INSIDE the
+    # root and returned true. Every existing segment of the path is now
+    # inspected and any reparse point is reported.
+    #
+    # REJECTING a reparse point rather than RESOLVING it is deliberate, and it
+    # is the stricter choice. Both consulted CLIs recommended
+    # GetFinalPathNameByHandle through P/Invoke; the OpenAI CLI also observed
+    # that rejecting every segment "is stricter and safer than accepting a link
+    # whose resolved target happens to be inside the root". That is right, and
+    # it needs no Add-Type block inside a security-relevant script.
+    #
+    # What this does NOT solve: the race. A path component can be repointed
+    # after this returns, and resolution would have had the same hole. The
+    # mitigation is structural and lives in register-exec-task.ps1: the
+    # restricted account must not be able to modify the components of its own
+    # permitted root.
+    $found = New-Object System.Collections.Generic.List[string]
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return @($found)
+    }
+    $current = ""
+    try {
+        $current = [IO.Path]::GetFullPath($Path).TrimEnd("\")
+    } catch {
+        return @("<unresolvable: " + $Path + ">")
+    }
+    # Bounded: a malformed path must not spin here.
+    for ($depth = 0; $depth -lt 64 -and -not [string]::IsNullOrWhiteSpace($current); $depth++) {
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue
+            if ($null -ne $item -and $item.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) {
+                $found.Add($current)
+            }
+        }
+        $parent = Split-Path -Parent $current
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $current) {
+            break
+        }
+        $current = $parent
+    }
+    return @($found)
+}
+
 function Test-PathWithinRoot {
     param([string]$Candidate, [string]$Root)
     $c = Get-NormalisedPath $Candidate
@@ -46,7 +102,95 @@ function Test-PathWithinRoot {
         return $false
     }
     # Segment-aware: "C:\a\bc" must not match root "C:\a\b".
-    return ($c -eq $r) -or $c.StartsWith($r + "\", [StringComparison]::Ordinal)
+    $lexicallyInside = ($c -eq $r) -or $c.StartsWith($r + "\", [StringComparison]::Ordinal)
+    if (-not $lexicallyInside) {
+        return $false
+    }
+    # And no reparse point anywhere on either path. Fails closed.
+    return (@(Get-ReparseSegments -Path $Candidate).Count -eq 0) -and
+           (@(Get-ReparseSegments -Path $Root).Count -eq 0)
+}
+
+function Test-SelfReplaceable {
+    param([string]$WrapperPath)
+
+    # Review finding 4. The previous check lived in the REGISTRATION script and
+    # matched ACE identity strings with a regex, against Allow ACEs only. It
+    # missed access granted through group membership, ownership (an owner can
+    # rewrite the DACL), deny-ACE precedence, inheritance, and the containing
+    # DIRECTORY - where Delete or CreateFiles lets the account replace the
+    # wrapper wholesale without ever writing to the file.
+    #
+    # It is replaced by a MEASURED OPERATION, performed by the account that
+    # matters, at the only moment that account is running: here. Same primitive
+    # as scripts/restricted-account-probe.ps1 - open for write with
+    # FileMode.Open, write nothing, close. That is this repository's standing
+    # preference over an effective-access query, and here is why: on 2026-08-15
+    # an ACL that read as reasonable turned out to be a stale grant, and only an
+    # attempt found it.
+    #
+    # Measured 2026-08-16, because it would otherwise mask every result:
+    # PowerShell does NOT hold a write lock on the script it is executing. A
+    # refusal here is an access denial, not a sharing violation.
+    $result = [ordered]@{
+        wrapper_path = [string]$WrapperPath
+        wrapper_writable = $false
+        wrapper_detail = ""
+        directory = ""
+        directory_writable = $false
+        directory_detail = ""
+        method = "open the wrapper for write with FileMode.Open and no bytes written; create and delete one file in its directory"
+        inconclusive = $false
+    }
+    if ([string]::IsNullOrWhiteSpace($WrapperPath) -or -not (Test-Path -LiteralPath $WrapperPath -PathType Leaf)) {
+        $result.inconclusive = $true
+        $result.wrapper_detail = "wrapper path is not a readable file; nothing was measured"
+        return $result
+    }
+
+    $stream = $null
+    try {
+        $stream = [IO.File]::Open($WrapperPath, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+        $result.wrapper_writable = $true
+        $result.wrapper_detail = "opened for write"
+    } catch {
+        $reason = $_.Exception
+        while ($null -ne $reason.InnerException) { $reason = $reason.InnerException }
+        $typeName = $reason.GetType().Name
+        $result.wrapper_detail = $typeName + ": " + $reason.Message
+        # Only an access denial is a refusal. Anything else proves nothing and
+        # must not be scored as containment.
+        if ($typeName -notin @("UnauthorizedAccessException", "SecurityException")) {
+            $result.inconclusive = $true
+        }
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+
+    $directory = Split-Path -Parent $WrapperPath
+    $result.directory = [string]$directory
+    $probe = Join-Path $directory ("director-wrapper-dir-probe-" + [guid]::NewGuid().ToString("N") + ".tmp")
+    try {
+        [IO.File]::WriteAllText($probe, "director wrapper directory probe")
+        $result.directory_writable = $true
+        $result.directory_detail = "created a file beside the wrapper"
+    } catch {
+        $reason = $_.Exception
+        while ($null -ne $reason.InnerException) { $reason = $reason.InnerException }
+        $typeName = $reason.GetType().Name
+        $result.directory_detail = $typeName + ": " + $reason.Message
+        if ($typeName -notin @("UnauthorizedAccessException", "SecurityException")) {
+            $result.inconclusive = $true
+        }
+    } finally {
+        if (Test-Path -LiteralPath $probe -PathType Leaf) {
+            Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $probe -PathType Leaf) {
+                $result.directory_detail += "; PROBE ARTIFACT NOT REMOVED: " + $probe
+            }
+        }
+    }
+    return $result
 }
 
 function Get-IdentityEvidence {
@@ -97,10 +241,25 @@ function Get-IdentityEvidence {
             } | Sort-Object)
         pid = $PID
         parent_pid = $parentId
-        # Expected to be the Task Scheduler service, not the operator's shell.
-        # This is what distinguishes a triggered task run from someone simply
-        # running the wrapper by hand.
+        # Review finding 6. The comment that used to sit here claimed this field
+        # distinguished a task-triggered run from a hand-run wrapper. It does
+        # not. The claim is WITHDRAWN rather than strengthened: a process name is
+        # trivially reproducible, and nothing inside a process can establish its
+        # own provenance.
+        #
+        # The OpenAI CLI proposed correlating against the scheduler's own
+        # Microsoft-Windows-TaskScheduler/Operational log, which is written by an
+        # external service and would therefore be stronger. Measured 2026-08-16
+        # on this machine: `wevtutil gl` reports that channel `enabled: false`.
+        # It records nothing, so there is nothing to correlate against. Its
+        # channelAccess does grant BATCH read - `(A;;0x3;;;S-1-5-3)` - so a
+        # task-triggered run could read it if an operator enabled the channel.
+        # That is an operator decision and nothing here depends on it.
+        #
+        # This field is retained as DATA, and labelled as data. It is not
+        # evidence of anything.
         parent_process = $parentName
+        parent_process_establishes_provenance = $false
         process_name = [string]$process.ProcessName
         cwd = (Get-Location).Path
         user_profile = [string][Environment]::GetEnvironmentVariable("USERPROFILE", "Process")
@@ -108,11 +267,31 @@ function Get-IdentityEvidence {
 }
 
 function New-LaunchEvidence {
-    param([string]$Worktree, [string]$Root)
+    param(
+        [string]$Worktree,
+        [string]$Root,
+        [AllowNull()][string]$RequiredSid,
+        [string]$WrapperPath
+    )
 
     $identity = Get-IdentityEvidence
     $failures = New-Object System.Collections.Generic.List[string]
 
+    # Review finding 2: assert, do not merely record.
+    $sidMatches = (
+        -not [string]::IsNullOrWhiteSpace($RequiredSid) -and
+        -not [string]::IsNullOrWhiteSpace($identity.sid) -and
+        ([string]$identity.sid) -ieq ([string]$RequiredSid)
+    )
+    if ([string]::IsNullOrWhiteSpace($RequiredSid)) {
+        $failures.Add("-ExpectedSid is required; a wrapper that records its account without requiring one proves nothing")
+    } elseif (-not $sidMatches) {
+        $failures.Add("this process is running as SID '" + $identity.sid +
+            "', not the required '" + $RequiredSid + "'")
+    }
+
+    $rootReparse = @(Get-ReparseSegments -Path $Root)
+    $worktreeReparse = @(Get-ReparseSegments -Path $Worktree)
     $withinRoot = Test-PathWithinRoot -Candidate $Worktree -Root $Root
     $exists = (-not [string]::IsNullOrWhiteSpace($Worktree)) -and (Test-Path -LiteralPath $Worktree -PathType Container)
     if ([string]::IsNullOrWhiteSpace($Worktree)) {
@@ -125,22 +304,48 @@ function New-LaunchEvidence {
             $failures.Add("worktree does not exist or is not a directory")
         }
     }
+    if ($rootReparse.Count -gt 0) {
+        $failures.Add("permitted root traverses a reparse point, so it cannot bound anything: " + ($rootReparse -join ", "))
+    }
+    if ($worktreeReparse.Count -gt 0) {
+        $failures.Add("worktree path traverses a reparse point, which can redirect it outside the permitted root: " + ($worktreeReparse -join ", "))
+    }
     if ($identity.is_elevated) {
         $failures.Add("wrapper is running elevated; the restricted account must not be an administrator")
     }
 
+    $selfProtection = Test-SelfReplaceable -WrapperPath $WrapperPath
+    if ($selfProtection.inconclusive) {
+        $failures.Add("wrapper self-protection check was INCONCLUSIVE: " +
+            $selfProtection.wrapper_detail + " / " + $selfProtection.directory_detail)
+    }
+    if ($selfProtection.wrapper_writable) {
+        $failures.Add("this account can open the wrapper for writing, so it can run its own code with the task's blessing: " + $selfProtection.wrapper_path)
+    }
+    if ($selfProtection.directory_writable) {
+        $failures.Add("this account can create files beside the wrapper, so it can replace the wrapper wholesale: " + $selfProtection.directory)
+    }
+
     return [ordered]@{
-        schema_version = "director.restricted-launch-evidence.v1"
+        schema_version = "director.restricted-launch-evidence.v2"
         ticket = 59
         generated_utc = (Get-Date).ToUniversalTime().ToString("o")
         status = $(if ($failures.Count -eq 0) { "completed" } else { "failed" })
+        expected_sid = [string]$RequiredSid
         identity = $identity
+        identity_checks = [ordered]@{
+            sid_matches_expected = $sidMatches
+            not_elevated = (-not $identity.is_elevated)
+        }
         worktree = [ordered]@{
             requested = [string]$Worktree
             permitted_root = [string]$Root
             within_permitted_root = $withinRoot
             exists = $exists
+            reparse_segments_in_worktree = @($worktreeReparse)
+            reparse_segments_in_root = @($rootReparse)
         }
+        wrapper_self_protection = $selfProtection
         executor = [ordered]@{
             invoked = $false
             note = "identity transition is proven on its own before any executor runs; see docs/adr/0001-restricted-account-launch.md"
@@ -151,9 +356,14 @@ function New-LaunchEvidence {
 
 function Invoke-SelfTest {
     # Runs without administrative rights, without the scheduled task, and
-    # without the director-exec account existing. It proves the path guard and
-    # the evidence shape only. It CANNOT prove the account switch, and says so.
+    # without the director-exec account existing. It proves the path guard, the
+    # identity assertion, the self-protection primitive, and the evidence shape.
+    # It CANNOT prove the account switch, and says so.
     $failures = New-Object System.Collections.Generic.List[string]
+    $wrapperPath = $PSCommandPath
+    if ([string]::IsNullOrWhiteSpace($wrapperPath)) {
+        $wrapperPath = $MyInvocation.MyCommand.Path
+    }
 
     $cases = @(
         @{ candidate = "C:\Users\director-exec\wt";        root = "C:\Users\director-exec"; expected = $true },
@@ -172,8 +382,69 @@ function Invoke-SelfTest {
         Write-Output ("self-test: path guard | candidate: '" + $case.candidate + "' | within '" + $case.root + "': " + ([string]$actual).ToLowerInvariant() + " | " + $verdict)
     }
 
-    $evidence = New-LaunchEvidence -Worktree "" -Root "C:\Users\director-exec"
-    foreach ($field in @("schema_version", "identity", "worktree", "failures", "status")) {
+    # Review finding 5, exercised against a REAL junction rather than argued
+    # about. The lexical half of the guard passes this case; the reparse half
+    # must overrule it.
+    $junctionRoot = Join-Path ([IO.Path]::GetTempPath()) ("director-junc-" + [guid]::NewGuid().ToString("N"))
+    $junctionEscape = Join-Path ([IO.Path]::GetTempPath()) ("director-escape-" + [guid]::NewGuid().ToString("N"))
+    $junctionLink = Join-Path $junctionRoot "wt"
+    $junctionMade = $false
+    try {
+        New-Item -ItemType Directory -Path $junctionRoot -Force | Out-Null
+        New-Item -ItemType Directory -Path $junctionEscape -Force | Out-Null
+        # mklink /J needs no privilege. New-Item -ItemType Junction is not
+        # available on every 5.1 build, so cmd is used, and whether the link was
+        # actually created is measured rather than assumed.
+        & $env:ComSpec /c ('mklink /J "' + $junctionLink + '" "' + $junctionEscape + '"') 2>&1 | Out-Null
+        $junctionMade = (Test-Path -LiteralPath $junctionLink)
+        if (-not $junctionMade) {
+            Write-Output "self-test: junction escape NOT exercised - mklink /J did not create the link on this machine"
+            $failures.Add("the junction escape case could not be exercised, so the reparse guard is unverified here")
+        } else {
+            $guarded = Test-PathWithinRoot -Candidate $junctionLink -Root $junctionRoot
+            $segments = @(Get-ReparseSegments -Path $junctionLink)
+            if ($guarded) {
+                $failures.Add("a junction inside the root was accepted; the reparse guard did not fire")
+            }
+            if ($segments.Count -lt 1) {
+                $failures.Add("Get-ReparseSegments did not report a junction it was pointed straight at")
+            }
+            Write-Output ("self-test: junction escape | link: " + $junctionLink +
+                " | guard allows: " + ([string]$guarded).ToLowerInvariant() +
+                " | reparse segments found: " + $segments.Count)
+        }
+    } catch {
+        $failures.Add("junction self-test threw: " + [string]$_)
+    } finally {
+        if ($junctionMade) {
+            & $env:ComSpec /c ('rmdir "' + $junctionLink + '"') 2>&1 | Out-Null
+        }
+        foreach ($path in @($junctionRoot, $junctionEscape)) {
+            if (Test-Path -LiteralPath $path) {
+                Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    # The self-protection primitive. No verdict is asserted about THIS machine:
+    # the operator owns these scripts and should be able to write them. What is
+    # asserted is that the check ran and reached a definite answer, because an
+    # inconclusive result is the failure mode that would silently pass.
+    $selfProtection = Test-SelfReplaceable -WrapperPath $wrapperPath
+    if ($selfProtection.inconclusive) {
+        $failures.Add("self-protection check was inconclusive against its own wrapper: " +
+            $selfProtection.wrapper_detail + " / " + $selfProtection.directory_detail)
+    }
+    if ($selfProtection.directory_detail -match "PROBE ARTIFACT NOT REMOVED") {
+        $failures.Add("self-protection directory probe left an artifact behind")
+    }
+    Write-Output ("self-test: self-protection | wrapper writable: " + ([string]$selfProtection.wrapper_writable).ToLowerInvariant() +
+        " | directory writable: " + ([string]$selfProtection.directory_writable).ToLowerInvariant() +
+        " | inconclusive: " + ([string]$selfProtection.inconclusive).ToLowerInvariant() +
+        " | " + $selfProtection.wrapper_detail)
+
+    $evidence = New-LaunchEvidence -Worktree "" -Root "C:\Users\director-exec" -RequiredSid "" -WrapperPath $wrapperPath
+    foreach ($field in @("schema_version", "identity", "identity_checks", "worktree", "wrapper_self_protection", "failures", "status")) {
         if (-not $evidence.Contains($field)) {
             $failures.Add("evidence is missing required field '$field'")
         }
@@ -181,8 +452,36 @@ function Invoke-SelfTest {
     if ($evidence.status -ne "failed") {
         $failures.Add("evidence with no worktree should fail closed")
     }
-    Write-Output ("self-test: fails closed with no worktree | status: " + $evidence.status)
-    Write-Output ("self-test: reports its own token | user: " + $evidence.identity.user + " | sid: " + $evidence.identity.sid + " | integrity: " + $evidence.identity.integrity_level + " | parent: " + $evidence.identity.parent_process)
+    if (-not ((@($evidence.failures) -join "; ").Contains("-ExpectedSid is required"))) {
+        $failures.Add("a run with no -ExpectedSid must fail for that reason and did not")
+    }
+    Write-Output ("self-test: fails closed with no worktree and no expected SID | status: " + $evidence.status)
+
+    # Review finding 2, exercised: a SID this process definitely does not have
+    # must be refused. S-1-5-18 is LocalSystem.
+    $wrongSid = New-LaunchEvidence -Worktree "" -Root "C:\Users\director-exec" -RequiredSid "S-1-5-18" -WrapperPath $wrapperPath
+    if ($wrongSid.identity_checks.sid_matches_expected) {
+        $failures.Add("the identity assertion accepted a SID this process does not have")
+    }
+    if (-not ((@($wrongSid.failures) -join "; ").Contains("not the required"))) {
+        $failures.Add("a SID mismatch must be named in the failures and was not")
+    }
+    Write-Output ("self-test: identity assertion is enforcing | required S-1-5-18 | matched: " +
+        ([string]$wrongSid.identity_checks.sid_matches_expected).ToLowerInvariant())
+
+    # And the converse. Without this, a check that refuses EVERYTHING would look
+    # correct here while being useless in the registered task.
+    $ownSid = [string]([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+    $rightSid = New-LaunchEvidence -Worktree "" -Root "C:\Users\director-exec" -RequiredSid $ownSid -WrapperPath $wrapperPath
+    if (-not $rightSid.identity_checks.sid_matches_expected) {
+        $failures.Add("the identity assertion rejected this process's own SID, so it refuses everything")
+    }
+    Write-Output ("self-test: identity assertion accepts the true SID | " + $ownSid + " | matched: " +
+        ([string]$rightSid.identity_checks.sid_matches_expected).ToLowerInvariant())
+
+    Write-Output ("self-test: reports its own token | user: " + $evidence.identity.user + " | sid: " + $evidence.identity.sid + " | integrity: " + $evidence.identity.integrity_level)
+    Write-Output ("self-test: parent process recorded as DATA, not provenance | parent: " + $evidence.identity.parent_process +
+        " | establishes provenance: " + ([string]$evidence.identity.parent_process_establishes_provenance).ToLowerInvariant())
     Write-Output "self-test: does NOT establish the account switch - that needs the registered task, and the operator to register it"
 
     if ($failures.Count -eq 0) {
@@ -197,7 +496,11 @@ if ($SelfTest) {
     Invoke-SelfTest
 }
 
-$evidence = New-LaunchEvidence -Worktree $WorktreePath -Root $PermittedRoot
+$selfPath = $PSCommandPath
+if ([string]::IsNullOrWhiteSpace($selfPath)) {
+    $selfPath = $MyInvocation.MyCommand.Path
+}
+$evidence = New-LaunchEvidence -Worktree $WorktreePath -Root $PermittedRoot -RequiredSid $ExpectedSid -WrapperPath $selfPath
 $json = $evidence | ConvertTo-Json -Depth 6
 if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
     $parent = Split-Path -Parent $OutputPath

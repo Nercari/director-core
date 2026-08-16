@@ -84,8 +84,15 @@ and not deprecated.
   is a human action by design.
 - The task definition and its action script become security-relevant files. If
   the executor can modify the wrapper, it can run its own code as the account.
-  The wrapper must live where the executor cannot write, and the registration
-  must set an ACL that enforces it.
+  The wrapper must live where the executor cannot write. **Amended 2026-08-16**:
+  this originally said the registration "must set an ACL that enforces it", and
+  the first implementation tried to, with an ACE-string check that missed group
+  membership, ownership, deny precedence, inheritance, and the containing
+  directory. Registration now enforces the **structural** property — the wrapper
+  must be outside the tree the account owns — and the access itself is measured
+  by the wrapper at trigger time, as the account, by opening itself for write.
+  Registration refuses on structure; the triggered run measures the access.
+  Neither is claimed to be the other.
 - Password rotation invalidates the stored task credential and requires
   re-registration. That is a feature: it fails closed and loudly.
 - The mechanism is recorded in the route registry rather than inferred from a
@@ -101,9 +108,21 @@ agent's prose as evidence, and a logon record is not proof of the executing
 identity either.
 
 Acceptance for this mechanism is: a triggered run reports SID
-`S-1-5-21-3373388009-2580916617-4075887755-1010`, from a process whose parent is
-the Task Scheduler service rather than the operator's shell, with the executor
-unable to modify the wrapper it ran from.
+`S-1-5-21-3373388009-2580916617-4075887755-1010`, and reports
+`wrapper_self_protection.wrapper_writable` and `.directory_writable` both false,
+measured by attempting the writes rather than reading an ACL.
+
+**Amended 2026-08-16.** This previously also required the run to come "from a
+process whose parent is the Task Scheduler service rather than the operator's
+shell". That criterion is **withdrawn, not weakened**: a process name is
+trivially reproducible, and nothing inside a process can establish its own
+provenance. The scheduler's own
+`Microsoft-Windows-TaskScheduler/Operational` channel would be external evidence
+and therefore stronger, but `wevtutil gl` reports it `enabled: false` on this
+machine, so it records nothing to correlate against. An operator who wants
+provenance must enable that channel first; its `channelAccess` already grants
+`BATCH` read, `(A;;0x3;;;S-1-5-3)`, so a task-triggered run could read it.
+Nothing in this ADR depends on that.
 
 ## What this ADR deliberately does not decide
 
