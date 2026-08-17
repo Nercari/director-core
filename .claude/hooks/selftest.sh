@@ -398,6 +398,20 @@ expect_block "matcher d_abspath"            block-dangerous-bash.sh "$(bash_cmd 
 expect_block "matcher d_refspec_to_main"    block-dangerous-bash.sh "$(bash_cmd 'git push origin task/x:refs/heads/main')"
 expect_block "matcher d_dquoted"            block-dangerous-bash.sh "$(bash_cmd 'git push origin "main"')"
 expect_block "matcher d_squoted"            block-dangerous-bash.sh "$(bash_cmd "git push origin 'main'")"
+# Force-push, moved onto the ordered per-segment matcher on 2026-08-16. The
+# flag-BEFORE-refspec cases are the ones the first attempt at that regex missed:
+# `push([[:space:]]|$)` consumes the separator, so a pattern demanding its own
+# leading space could never match a flag sitting immediately after the verb.
+# Six of these failed against that first version.
+expect_block "matcher d_force_before"       block-dangerous-bash.sh "$(bash_cmd 'git push --force origin task/x')"
+expect_block "matcher d_force_after"        block-dangerous-bash.sh "$(bash_cmd 'git push origin task/x --force')"
+expect_block "matcher d_force_short"        block-dangerous-bash.sh "$(bash_cmd 'git push -f origin task/x')"
+expect_block "matcher d_force_lease"        block-dangerous-bash.sh "$(bash_cmd 'git push --force-with-lease origin task/x')"
+expect_block "matcher d_force_lease_eq"     block-dangerous-bash.sh "$(bash_cmd 'git push --force-with-lease=main origin task/x')"
+expect_block "matcher d_force_includes"     block-dangerous-bash.sh "$(bash_cmd 'git push --force-if-includes origin task/x')"
+expect_block "matcher d_force_dashC"        block-dangerous-bash.sh "$(bash_cmd 'git -C /tmp/r push -f origin task/x')"
+expect_block "matcher d_force_bash_c"       block-dangerous-bash.sh "$(bash_cmd 'bash -c "git push --force origin main"')"
+
 expect_block "matcher d_refsheads"          block-dangerous-bash.sh "$(bash_cmd 'git push origin refs/heads/main')"
 expect_block "matcher d_refsheads_dq"       block-dangerous-bash.sh "$(bash_cmd 'git push origin "refs/heads/main"')"
 expect_block "matcher d_plusref"            block-dangerous-bash.sh "$(bash_cmd 'git push origin +main')"
@@ -428,6 +442,15 @@ expect_allow "matcher a_log_grep_eq"     block-dangerous-bash.sh "$(bash_cmd 'gi
 expect_allow "matcher a_grep"            block-dangerous-bash.sh "$(bash_cmd 'git grep push main')"
 expect_allow "matcher a_show_grep"       block-dangerous-bash.sh "$(bash_cmd 'git show --grep push main')"
 expect_allow "matcher c_integrity"       block-dangerous-bash.sh "$(bash_cmd 'git status --short')"
+
+# THE FALSE POSITIVE THAT MOTIVATED THE FORCE-PUSH REWRITE. The old rule was an
+# unordered glob, *"push"*"-f "*, so an ordinary push followed by an unrelated
+# `rm -f` anywhere later in the line was denied as a force-push. Measured
+# 2026-08-16 while opening a pull request: it blocked the push, not the rm.
+expect_allow "matcher a_push_then_rm_f"   block-dangerous-bash.sh "$(bash_cmd 'git push -u origin task/x && rm -f pr-body.md')"
+expect_allow "matcher a_push_then_grep_f" block-dangerous-bash.sh "$(bash_cmd 'git push origin task/x; grep -f patterns file')"
+expect_allow "matcher a_rm_f_then_push"   block-dangerous-bash.sh "$(bash_cmd 'rm -f body.md && git push origin task/x')"
+expect_allow "matcher a_name_ends_f"      block-dangerous-bash.sh "$(bash_cmd 'git push origin task/x && ls dist/bundle-f')"
 
 echo
 echo "block-dangerous-bash — denial wording for the reasons that changed"
