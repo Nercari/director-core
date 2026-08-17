@@ -25,10 +25,21 @@ deny() {
 }
 
 # --- history rewriting -------------------------------------------------------
-case "$cmd" in
-*"push"*"--force"* | *"push"*"-f "*)
-  deny "force-push. Prefer revert; never rewrite history (§9.7)." ;;
-esac
+# THE FORCE-PUSH RULE MOVED DOWN, to sit with the other git rules and use the
+# same ordered per-segment matcher. It was the last unordered glob in this file:
+#
+#     *"push"*"--force"* | *"push"*"-f "*
+#
+# Measured 2026-08-16: that denied
+#     git push -u origin task/x && rm -f pr-body.md
+# as a force-push, because "push" appeared somewhere and "-f " appeared
+# somewhere after it, anywhere in the line, in any order. The comment below
+# already recorded that the unordered globs were replaced for exactly this
+# reason; the force-push check predated the replacement and kept the old shape.
+#
+# It failed in the other direction too. `bash -c "git push --force"` is one
+# segment of text, and the old glob happened to catch it - but only by accident
+# of matching substrings, the same accident that produced the false positive.
 
 case "$cmd" in
 *"reset --hard"*)
@@ -69,6 +80,19 @@ gverb="(^|[^A-Za-z0-9_-])git[[:space:]]+(${opt})*"
 # what keeps a branch called "mainline" out of this.
 ref="[[:space:]][${sq}${dq}]?[+]?([^[:space:]${sq}${dq}]*:)?(refs/heads/)?main[${sq}${dq}]?([[:space:]]|\$)"
 
+# Force flags as whole option tokens, anywhere in a push's arguments. -f is
+# matched only as its own word, so `rm -f`, `grep -f list` and a filename
+# ending in "-f" cannot reach it, and it must still follow `git ... push` in the
+# SAME segment. --force-with-lease and --force-if-includes are force-pushes too;
+# they are safer than --force and still rewrite a published branch.
+force="(--force|--force-with-lease(=${arg})?|--force-if-includes|-f)([[:space:]]|\$)"
+# `(.*[[:space:]])?` and NOT `.*` before the flag. The subcommand match already
+# consumes the space after "push", so a pattern requiring its own leading space
+# could never match a flag sitting immediately after it: `git push --force x`
+# went through while `git push x --force` was caught. Measured, six cases, before
+# this form replaced it.
+re_force_push="${gverb}push([[:space:]]|\$)(.*[[:space:]])?${force}"
+
 re_push_main="${gverb}push([[:space:]]|\$).*${ref}"
 re_delete="${gverb}push([[:space:]]|\$).*([[:space:]](--delete|-d|-D)([[:space:]]|\$)|[[:space:]][${sq}${dq}]?:[A-Za-z0-9_/.-]+)"
 re_merge="${gverb}merge([^A-Za-z0-9_-]|\$)"
@@ -86,6 +110,12 @@ git_match() {
 # push-to-main is tested before deletion so a colon refspec to main is named for
 # what it is. The old order reported `git push origin :main` as a branch
 # deletion, which denied correctly and explained wrongly.
+# Force-push is tested first: `git push --force origin main` is both, and the
+# rewrite is the more serious of the two facts about it.
+if git_match "$re_force_push"; then
+  deny "force-push. Prefer revert; never rewrite history (§9.7)."
+fi
+
 if git_match "$re_push_main"; then
   deny "push to main. Push task/<unit-id> and open a pull request (§16)."
 fi
