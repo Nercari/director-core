@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# commit-msg — refuse a commit message that GitHub would read as closing an issue.
+#
+# WHY THIS EXISTS. On 2026-08-16, issue #59 was closed as COMPLETED with five of
+# its nine acceptance criteria unmet. Nothing intended that. A commit message
+# written a day earlier, specifically to PREVENT an overclaim, contained:
+#
+#     This does not resolve #59. Criteria 1 and 3 remain the blockers: ...
+#
+# GitHub's linkifier matched `resolve #59` and discarded the negation. The most
+# careful sentence in the commit is what closed the issue. The line then survived
+# as a re-applied copy through four superseded pull requests and fired when the
+# fifth finally merged.
+#
+# It is a commit-msg hook, not pre-commit: pre-commit runs BEFORE the message
+# exists, so it cannot see the text that causes this.
+#
+# Enable per clone with:
+#     git config core.hooksPath .githooks
+set -uo pipefail
+
+MSG_FILE="${1:-}"
+[ -n "$MSG_FILE" ] && [ -f "$MSG_FILE" ] || exit 0
+
+# Comment lines are stripped by git and never reach GitHub, so they cannot close
+# anything. Scissors lines and everything after them are dropped too.
+body="$(sed '/^#/d; /^------------------------ >8 ------------------------$/,$d' "$MSG_FILE")"
+
+# GitHub's closing keywords, all forms it accepts, immediately before an issue
+# reference. Case-insensitive. `#123`, `owner/repo#123` and full URLs all count.
+pattern='(clos(e|es|ed|ing)|fix(e|es|ed|ing)?|resolv(e|es|ed|ing))[[:space:]]+((https?://[^[:space:]]*/issues/[0-9]+)|([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#[0-9]+)'
+
+hits="$(printf '%s' "$body" | grep -inE "$pattern" || true)"
+[ -z "$hits" ] && exit 0
+
+if [ "${DIRECTOR_ALLOW_ISSUE_CLOSE:-}" = "1" ]; then
+  echo "commit-msg: closing keyword allowed by DIRECTOR_ALLOW_ISSUE_CLOSE=1:" >&2
+  printf '%s\n' "$hits" | sed 's/^/  /' >&2
+  exit 0
+fi
+
+echo "DENIED by commit-msg: this message would close an issue on merge." >&2
+echo >&2
+printf '%s\n' "$hits" | sed 's/^/  line /' >&2
+echo >&2
+echo "GitHub matches the keyword and the number and IGNORES any negation around" >&2
+echo "them, so 'does not resolve #59' closes #59. That is not hypothetical: it" >&2
+echo "closed #59 as COMPLETED on 2026-08-16 with five criteria unmet." >&2
+echo >&2
+echo "Rewrite so no keyword sits immediately before the number:" >&2
+echo "    does not resolve #59      ->  #59 is not resolved by this" >&2
+echo "    fixes #12                 ->  the defect in #12 is corrected here" >&2
+echo "    closes #7                 ->  criteria 1 and 3 of #7 remain open" >&2
+echo >&2
+echo "If you genuinely intend this commit to close the issue:" >&2
+echo "    DIRECTOR_ALLOW_ISSUE_CLOSE=1 git commit ..." >&2
+exit 1
