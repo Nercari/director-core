@@ -1,0 +1,35 @@
+run_id: a0-cap-02-fact-ledger
+unit_id: a0-cap-02-fact-ledger
+base_commit: d0409936005d2161ae10f3ce1d08a3b9eaaf5854
+change_class: behavior
+route: EXEC_STRONG
+objective: Give canonical telemetry facts stable identity and deterministic duplicate, replay, concurrency, and interrupted-write behavior without creating another ledger.
+acceptance_criteria:
+  - Ingesting the same logical fact twice prints one ingested record and one duplicate skip, and the canonical ledger contains one matching row.
+  - Starting two writers with the same fact identity produces one canonical row and no conflicting index entry.
+  - Replaying an already ingested source after process restart leaves the ledger and index byte counts unchanged and reports the existing fact identity.
+  - The crash-after-ledger fixture is detected on restart and repairs or reports the index state without appending a second canonical fact.
+  - Two records with the same identity but different content produce a visible conflict error and neither is silently selected as authoritative.
+allowed_paths:
+  - scripts/telemetry/ingest.py
+  - scripts/telemetry/resilience_selfcheck.py
+  - schemas/invocation.schema.json
+forbidden_paths:
+  - scripts/telemetry/reduce.py
+  - scripts/validate-result.sh
+required_tests:
+  - python scripts/telemetry/resilience_selfcheck.py
+behavior_check: >-
+  COMMAND: python scripts/telemetry/resilience_selfcheck.py --case duplicate-concurrent-fact;
+  WATCH: both writers terminate, the summary names one accepted fact and one duplicate,
+  and the displayed canonical ledger count is exactly one.
+constraints:
+  - Reuse the canonical invocation ledger; do not create a second telemetry ledger.
+  - Current Ledger.append behavior is evidence to strengthen or constrain, not a transactionality guarantee.
+  - Any invocation-schema change must be the minimum needed to persist reconstructable fact identity.
+stop_conditions:
+  - Stop if the selected identity cannot be reconstructed from a persisted canonical record.
+output_contract:
+  modified_files: required
+  evidence_bundle: required
+  result_json: required

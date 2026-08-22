@@ -1,0 +1,43 @@
+run_id: a0-cap-09-evidence-bundle
+unit_id: a0-cap-09-evidence-bundle
+base_commit: d0409936005d2161ae10f3ce1d08a3b9eaaf5854
+change_class: behavior
+route: EXEC_STRONG
+objective: Define and validate a sanitized Run-bound evidence package whose contained artifacts and digests can be audited without retaining raw provider/session data.
+acceptance_criteria:
+  - Validating a complete fixture prints every required Run artifact kind and verifies each SHA-256 digest without network access.
+  - Fixtures containing a raw prompt, provider payload, tool stream, arbitrary repository excerpt, quarantine bytes, or seeded secret print the offending artifact and fail validation.
+  - Path-escape, digest-mismatch, missing-artifact, executable-content, and promotion-authority fixtures each fail with a specific visible reason.
+  - A valid package identifies run_id, packet, execution receipt, thread binding, result, normalized usage, validation receipt, provenance, capture health, and eligibility when applicable.
+  - Validation of a package fixture leaves all fixture bytes unchanged and makes no network request.
+allowed_paths:
+  - schemas/evidence-bundle.schema.json
+  - scripts/validate-evidence-bundle.sh
+  - examples/evidence-bundle/a0-run-valid.json
+  - examples/evidence-bundle/a0-run-sensitive.invalid.json
+  - examples/evidence-bundle/a0-run-path-escape.invalid.json
+  - examples/evidence-bundle/a0-run-digest-mismatch.invalid.json
+  - examples/evidence-bundle/artifacts/a0-run-manifest.json
+  - examples/evidence-bundle/artifacts/a0-execution-receipt.json
+  - examples/evidence-bundle/artifacts/a0-usage.json
+  - examples/evidence-bundle/artifacts/a0-validation-receipt.json
+forbidden_paths:
+  - .telemetry/*.jsonl
+  - .director/runs/*
+  - docs/evidence/*.raw.txt
+required_tests:
+  - bash scripts/validate-evidence-bundle.sh examples/evidence-bundle/a0-run-valid.json
+  - bash scripts/check-example-sanitization.sh
+behavior_check: >-
+  COMMAND: powershell -NoProfile -Command "& 'C:\Program Files\Git\bin\bash.exe' scripts/validate-evidence-bundle.sh examples/evidence-bundle/a0-run-sensitive.invalid.json";
+  WATCH: validation names the seeded sensitive artifact, exits nonzero, performs no fetch,
+  and the fixture digest printed before and after is unchanged.
+constraints:
+  - Depends on a0-cap-03-execution-capture, a0-cap-05-rollout-usage, a0-cap-06-result-relay, and a0-cap-07-validation-capture.
+  - Reuse existing evidence containment, digest, no-network, and no-promotion conventions.
+stop_conditions:
+  - Stop if auditability requires committing raw Codex sessions, prompts, provider payloads, or quarantine bytes.
+output_contract:
+  modified_files: required
+  evidence_bundle: required
+  result_json: required

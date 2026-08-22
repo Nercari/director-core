@@ -1,0 +1,41 @@
+run_id: a0-cap-08-capture-coverage
+unit_id: a0-cap-08-capture-coverage
+base_commit: d0409936005d2161ae10f3ce1d08a3b9eaaf5854
+change_class: behavior
+route: EXEC_STRONG
+objective: Make every A0-admitted EXEC_STRONG invocation prove passage through the governed capture seam while leaving route policy selection and existing write guards unchanged.
+acceptance_criteria:
+  - The registered-route fixture resolves EXEC_STRONG through the capture entrypoint and prints a valid capture-proof identifier.
+  - Direct legacy jail and direct Codex fixtures produce no admissible proof and the A0 admission command prints bypass_detected.
+  - Changing advisor output, exploration percentage, or populated telemetry in fixtures does not change the displayed actual route from EXEC_STRONG.
+  - Existing model Write/Edit guard self-tests produce the same decisions before and after the change, while a host-side fixture can persist capture evidence.
+  - Inspection of the accepted invocation shows the route registry and capture proof, not command-substring matching, caused admission.
+allowed_paths:
+  - scripts/capture/admission.py
+  - scripts/capture/admission_selfcheck.py
+  - .director/routes.yaml
+  - scripts/conformance.py
+forbidden_paths:
+  - .claude/hooks/block-dangerous-bash.sh
+  - .claude/hooks/block-out-of-scope-write.sh
+  - .telemetry/routing-policy.yaml
+  - scripts/preflight.sh
+  - scripts/exec-jail.sh
+  - scripts/validate-result.sh
+required_tests:
+  - python scripts/capture/admission_selfcheck.py
+  - python scripts/conformance.py
+behavior_check: >-
+  COMMAND: python scripts/capture/admission_selfcheck.py --case direct-bypass;
+  WATCH: the registered captured invocation prints admitted with a proof identifier,
+  the direct legacy invocation prints bypass_detected, and both display EXEC_STRONG as the requested route.
+constraints:
+  - Depends on a0-cap-03-execution-capture and a0-cap-06-result-relay.
+  - Route/config conformance plus A0 admission is the selected enforcement topology for this packet.
+  - Capture verifies route provenance and never chooses route policy.
+stop_conditions:
+  - Stop if coverage cannot be proved without modifying the existing hook or jail boundaries.
+output_contract:
+  modified_files: required
+  evidence_bundle: required
+  result_json: required

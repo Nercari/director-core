@@ -1,0 +1,35 @@
+run_id: a0-cap-01-run-claim
+unit_id: a0-cap-01-run-claim
+base_commit: d0409936005d2161ae10f3ce1d08a3b9eaaf5854
+change_class: behavior
+route: EXEC_STRONG
+objective: Claim one packet-provided candidate run_id durably before launch and reject reuse without introducing another execution identity.
+acceptance_criteria:
+  - Running the duplicate-claim fixture prints one successful claim followed by a refusal naming the reused run_id, and the fixture records exactly one launch marker.
+  - Running two concurrent claim processes for the same run_id prints exactly one winner and one duplicate refusal, and inspection shows one durable claim record.
+  - Running recovery for a claimed run_id reopens its record without creating a launch marker or a second claim.
+  - Supplying a missing or empty run_id exits nonzero before any executor fixture starts.
+allowed_paths:
+  - scripts/capture/run_claim.py
+  - scripts/capture/run_claim_selfcheck.py
+  - scripts/conformance.py
+forbidden_paths:
+  - schemas/work-unit.schema.json
+  - scripts/worktree.sh
+  - scripts/validate-result.sh
+required_tests:
+  - python scripts/capture/run_claim_selfcheck.py
+behavior_check: >-
+  COMMAND: python scripts/capture/run_claim_selfcheck.py --case duplicate;
+  WATCH: the first claim prints CLAIMED, the second prints DUPLICATE with the same run_id,
+  and the summary reports one durable claim and one launch marker.
+constraints:
+  - Packet materialization remains manual/orchestrator-side and is not implemented here.
+  - Packet authorship supplies a candidate identity but does not enforce uniqueness.
+  - Do not introduce Attempt or a second execution identifier.
+stop_conditions:
+  - Stop if uniqueness cannot be enforced before the synthetic launch marker is created.
+output_contract:
+  modified_files: required
+  evidence_bundle: required
+  result_json: required

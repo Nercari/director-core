@@ -1,0 +1,40 @@
+run_id: a0-cap-06-result-relay
+unit_id: a0-cap-06-result-relay
+base_commit: d0409936005d2161ae10f3ce1d08a3b9eaaf5854
+change_class: behavior
+route: EXEC_STRONG
+objective: Promote a candidate emitted through --output-last-message into the authoritative Director result only after JSON parsing, unchanged schema validation, consistency checks, and digest binding.
+acceptance_criteria:
+  - A valid candidate fixture prints promoted, retains its digest, and materializes byte-identical content at the validator input path.
+  - Missing, malformed JSON, schema-invalid, route-mismatched, branch-mismatched, write-failed, and digest-mismatched fixtures print distinct result failure classifications.
+  - Every failed fixture leaves the authoritative result absent and prints validation_not_started.
+  - Inspection of result.schema.json before and after the behavior check shows identical bytes and no run_id field.
+  - The invocation fixture displays --output-last-message as the only change to the pinned inner Codex command fields.
+allowed_paths:
+  - scripts/capture/result_relay.py
+  - scripts/capture/result_relay_selfcheck.py
+  - scripts/capture/execution.py
+  - .director/routes.yaml
+  - scripts/conformance.py
+forbidden_paths:
+  - schemas/result.schema.json
+  - scripts/exec-jail.sh
+  - scripts/validate-result.sh
+  - .telemetry/routing-policy.yaml
+required_tests:
+  - python scripts/capture/result_relay_selfcheck.py
+behavior_check: >-
+  COMMAND: python scripts/capture/result_relay_selfcheck.py --case malformed;
+  WATCH: the Run prints result_malformed, no authoritative result is created,
+  validation_not_started is printed, and the synthetic executor outcome is unchanged.
+constraints:
+  - Depends on a0-cap-03-execution-capture and a0-cap-04-thread-binding.
+  - BLOCKED BEFORE IMPLEMENTATION until operator-restored Codex subscription authentication passes preflight and V8 verifies successful --output-last-message artifact behavior.
+  - If V8 disproves the candidate source, stop and return to the specification; do not substitute another channel.
+stop_conditions:
+  - Stop if V8 has not passed before implementation begins.
+  - Stop if candidate promotion requires changing result.schema.json or validator semantics.
+output_contract:
+  modified_files: required
+  evidence_bundle: required
+  result_json: required

@@ -1,0 +1,40 @@
+run_id: a0-cap-03-execution-capture
+unit_id: a0-cap-03-execution-capture
+base_commit: d0409936005d2161ae10f3ce1d08a3b9eaaf5854
+change_class: behavior
+route: EXEC_STRONG
+objective: Record governed executor launch and terminal process facts separately from validation, capture health, and route-policy authority.
+acceptance_criteria:
+  - The synthetic success fixture prints the claimed run_id, verified EXEC_STRONG route, launch timestamp, exit code zero, and capture-health state.
+  - The nonzero, timeout, cancellation, and launch-failure fixtures print distinct execution outcomes without printing validation passed or failed.
+  - A capture-persistence failure leaves the synthetic executor exit code unchanged, prints capture_incomplete, and makes the Run ineligible.
+  - A mandatory preflight refusal prints not_launched and no governed executor launch marker exists.
+  - Supplying a route other than the packet's EXEC_STRONG value refuses before launch and prints both expected and observed route values.
+allowed_paths:
+  - scripts/capture/execution.py
+  - scripts/capture/execution_selfcheck.py
+  - scripts/conformance.py
+forbidden_paths:
+  - .director/routes.yaml
+  - .telemetry/routing-policy.yaml
+  - scripts/exec-jail.sh
+  - scripts/preflight.sh
+  - scripts/worktree.sh
+  - scripts/validate-result.sh
+required_tests:
+  - python scripts/capture/execution_selfcheck.py
+behavior_check: >-
+  COMMAND: python scripts/capture/execution_selfcheck.py --case capture-failure;
+  WATCH: the synthetic executor exits with its configured code, the Run prints capture_incomplete,
+  and the output contains no route-selection, validation, promotion, or merge action.
+constraints:
+  - Depends on a0-cap-01-run-claim.
+  - Capture observes and verifies the predeclared route; it does not choose route policy.
+  - Do not acquire authority over accounts, credentials, egress, worktrees, jail enforcement, validation, review, promotion, or merge.
+  - Preflight must terminate unambiguously RED or GREEN; tool-resolution noise is never successful preflight.
+stop_conditions:
+  - Stop if capture failure changes the synthetic executor's configured terminal result.
+output_contract:
+  modified_files: required
+  evidence_bundle: required
+  result_json: required

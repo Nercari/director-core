@@ -1,0 +1,35 @@
+run_id: a0-cap-09-evidence-freeze
+unit_id: a0-cap-09-evidence-freeze
+base_commit: d0409936005d2161ae10f3ce1d08a3b9eaaf5854
+change_class: behavior
+route: EXEC_STRONG
+objective: Retain or durably reference each sanitized Run evidence package and block A0 freeze when its referent is missing, unreadable, digest-invalid, or capture-incomplete.
+acceptance_criteria:
+  - Freezing a locally retained valid package prints its durable path or reference, recomputed digest, and evidence_complete eligibility.
+  - A bare-digest fixture with no retained referent prints missing_referent and is ineligible.
+  - Missing, unreadable, moved, and digest-changed referent fixtures print distinct freeze refusal reasons.
+  - A capture-incomplete package remains retained for diagnosis but the freeze command prints A0_ineligible.
+  - Re-running freeze for the same unchanged package reports the existing retained identity and creates no duplicate retained artifact.
+allowed_paths:
+  - scripts/capture/evidence_freeze.py
+  - scripts/capture/evidence_freeze_selfcheck.py
+  - docs/evidence/a0-retention-policy.md
+forbidden_paths:
+  - .telemetry/*.jsonl
+  - .director/runs/*
+  - schemas/evidence-bundle.schema.json
+required_tests:
+  - python scripts/capture/evidence_freeze_selfcheck.py
+behavior_check: >-
+  COMMAND: python scripts/capture/evidence_freeze_selfcheck.py --case bare-digest;
+  WATCH: the command prints missing_referent and A0_ineligible,
+  and no freeze-complete marker or duplicate retained artifact is created.
+constraints:
+  - Depends on a0-cap-02-ledger-integrity and a0-cap-09-evidence-bundle.
+  - The selected retention location must be reviewed and durable; a transient local path is insufficient.
+stop_conditions:
+  - Stop if the selected retention design preserves only a digest or requires raw provider/session data in Git.
+output_contract:
+  modified_files: required
+  evidence_bundle: required
+  result_json: required
