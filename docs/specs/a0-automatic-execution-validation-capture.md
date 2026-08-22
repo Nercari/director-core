@@ -15,7 +15,7 @@ The problem is not merely missing telemetry. The missing capability is a governe
 
 ## Verified Current State
 
-1. The WorkUnit contract already requires a non-empty `run_id`. The capture lifecycle can adopt and claim this identity before launch rather than introducing an `Attempt` entity or adding `run_id` to the closed result contract.
+1. The WorkUnit contract already requires a non-empty `run_id`, but current production source does not materialize `packet.yaml` or enforce that identity's uniqueness. The packet-provided value is a candidate Run identity; the governed capture lifecycle must atomically claim it before launch rather than introducing an `Attempt` entity or adding `run_id` to the closed result contract.
 2. `EXEC_STRONG` is the only currently usable governed executor route. It invokes Codex through the existing credential-removal jail with model `gpt-5.6-luna`, reasoning effort `max`, subscription authentication, and `codex-cli 0.145.0`. Its current route declaration runs as the operator and retains open network egress.
 3. Routing policy maps workflow shape `director-primary_executor-strong` to executor route `EXEC_STRONG`. The policy is advisory and exploration remains enabled, but current source contains no automatic advisor-to-dispatch connection.
 4. `codex exec --json` emits `thread.started.thread_id` as its first valid JSON lifecycle event before substantive execution. In two surviving real captures, that identifier exactly equalled both `session_meta.id` and `session_meta.session_id` and appeared in the corresponding rollout filename. No newest-file, cwd, or timestamp heuristic is required.
@@ -46,7 +46,7 @@ No single status field may stand in for all four.
 
 ## Solution
 
-Director will establish one authoritative host-side governed invocation seam for A0. That seam will adopt the WorkUnit packet's unique `run_id` before launch, record immutable Run and provenance metadata, invoke the unchanged `EXEC_STRONG` command through the existing jail, capture the exact Codex thread identifier from the early lifecycle stream, retain execution terminal facts, relay the executor's dedicated terminal result into the validator's existing input contract, and bind supported usage from the exact rollout identified by that thread.
+Director will establish one authoritative host-side governed invocation seam for A0. That seam will atomically claim the WorkUnit packet's candidate `run_id` before launch, record immutable Run and provenance metadata, invoke `EXEC_STRONG` through the existing jail with only the reviewed observational result-channel addition, capture the exact Codex thread identifier from the early lifecycle stream, retain execution terminal facts, relay the executor's candidate terminal result into the validator's existing input contract, and bind supported usage from the exact rollout identified by that thread.
 
 Validation remains a later, separately invocable governed operation. It will invoke the unchanged validator once for an explicitly intended validation invocation, durably retain its exit code and output, derive a normalized validation fact from the existing terminal contract, and persist that fact without rerunning validation during capture recovery.
 
@@ -93,7 +93,7 @@ The canonical invocation ledger remains the sole telemetry ledger. A Run-owned l
 
 ### 1. Authorize and claim the Run
 
-The existing WorkUnit packet is the source of `run_id`; the authoritative invocation seam obtains rather than independently remints it. Before executor launch it must:
+The existing WorkUnit packet supplies the candidate `run_id`; packet authorship does not prove uniqueness. Packet materialization remains manual/orchestrator-side under the current workflow and is not introduced by this specification. Before executor launch, the authoritative invocation seam obtains rather than independently remints the candidate identity and must:
 
 - validate the WorkUnit packet against its existing contract;
 - map `unit_id` to telemetry `work_unit_id` without inventing a second WorkUnit identity;
@@ -145,7 +145,9 @@ The V4 result proves only one GNU timeout 8.32 topology. Generic Windows descend
 
 ### 5. Relay the authoritative executor result
 
-The authoritative result source is a dedicated executor terminal-result channel, not arbitrary event stdout and not the rollout. The current Codex CLI's dedicated last-message output capability is the narrowest source-backed channel available for implementation; tickets must verify its exact behavior under the pinned CLI before relying on it.
+The proposed candidate result source is the dedicated executor terminal-result channel created by adding `--output-last-message <FILE>` to the inner Codex command, not arbitrary event stdout and not the rollout. Local CLI help for `codex-cli 0.145.0` confirms the flag exists and describes the file only as containing the last message from the agent. Its successful byte representation, transformation behavior, and timeout/failure behavior remain unmeasured because the local CLI is not authenticated.
+
+V8 successful-artifact verification is a pre-implementation gate for any ticket that relies on this flag. After the operator restores subscription authentication, V8 must verify the required success behavior on the pinned/declared CLI version. If the flag proves unsuitable, implementation stops and returns to this specification rather than silently selecting another result source. Fully measuring CLI timeout/failure behavior is not required when the relay can safely classify a missing or unusable candidate file itself.
 
 The model-facing output instruction must require that channel to contain exactly one JSON document satisfying the existing result contract. Structured-output flags must not be adopted if they require changing optional-field semantics. The host stages the terminal message outside model `Write/Edit`, parses it, validates it against the unchanged result schema, and confirms its route and branch are consistent with the authorized WorkUnit.
 
@@ -156,7 +158,7 @@ On success, the host:
 - records which Run currently owns that validator input;
 - binds packet digest, result digest, and `run_id` in the Run manifest.
 
-On missing output, non-JSON output, schema rejection, inconsistent route/branch, write failure, or digest mismatch, result relay fails visibly. Validation must not start without an authoritative bound result. The executor's actual terminal outcome remains unchanged.
+The emitted file is a candidate, not a certified Director result. It becomes authoritative only after candidate acquisition, JSON parsing, validation against `result.schema.json`, and digest-bound promotion. At minimum, the relay distinguishes `result_missing`, `result_malformed`, `result_schema_invalid`, and `result_relay_failed`. Validation must not start without an authoritative bound result. The executor's actual terminal outcome remains unchanged.
 
 `result.schema.json` remains unchanged and does not gain `run_id`. Correlation belongs to the Run manifest and retained evidence.
 
@@ -242,8 +244,8 @@ The sanitized package is the durable audit artifact and may be version-controlle
 
 ## Ownership Boundaries
 
-- **WorkUnit authoring/orchestration** owns objective, packet, `run_id`, route declaration, scope, criteria, required tests, expected terminal semantics, and frozen instruction artifact.
-- **Governed host invocation seam** owns Run claim, exact route invocation, thread binding, process observation, result-channel capture, result relay, usage-source binding, and execution capture health.
+- **WorkUnit authoring/orchestration** owns objective, manually/orchestrator-supplied packet and candidate `run_id`, route declaration, scope, criteria, required tests, expected terminal semantics, and frozen instruction artifact. It does not enforce Run-identity uniqueness.
+- **Governed host invocation seam** owns the unique launch claim, observation, correlation, capture health, route verification/provenance, thread binding, process observation, result-channel capture, result relay, and usage-source binding. It does not select route policy or acquire authority over account identity, credentials, egress, worktree containment, jail enforcement, deterministic validation, independent review, promotion, or merge.
 - **Executor** owns edits and the semantic contents of the existing result contract. It does not write Director telemetry through model `Write/Edit`.
 - **Existing jail** continues to own gate-credential removal and nothing more. It is not described as network or account isolation.
 - **Validation operation** owns exactly-once invocation claiming, validator process capture, durable validation receipt, and normalized validation fact.
@@ -256,10 +258,11 @@ The sanitized package is the durable audit artifact and may be version-controlle
 
 | Situation | Execution outcome | Validation state | Measurement/capture health | A0 eligibility |
 |---|---|---|---|---|
+| Mandatory preflight refuses launch, including unavailable or unverifiable subscription authentication | not launched; no governed executor Run began | not applicable/not started | preflight refusal is observable control evidence, not an executor telemetry fact | not a completed Run and not one of the four launched-Run scenarios |
 | Run claimed, executor never launched | `not_launched` or `launch_failed` | pending/not applicable | complete if launch failure recorded; otherwise incomplete | ineligible |
 | Executor launched, no valid `thread.started.thread_id` | follows actual process | pending | binding defect | ineligible |
 | Thread bound, executor crashes | nonzero/signal | pending until an authoritative result exists | complete only if terminal/evidence captured; usage may be partial | normally ineligible; may qualify only as a predeclared special scenario |
-| Executor timeout | timed out | pending | include timeout and observable cleanup evidence | normal sample ineligible; special scenario only if predeclared |
+| Real executor timeout during governed work | timed out | pending | include timeout, partial-work evidence, and observable cleanup facts | required timeout scenario only when predeclared in the frozen corpus |
 | Cancellation | cancelled | pending | include cancellation and descendant/lock observations | cancellation special scenario only if predeclared |
 | Executor exits nonzero | exited nonzero | pending | independent capture status | normal sample ineligible unless expected terminal semantics say otherwise |
 | Executor exits zero, terminal result absent | exited zero | cannot start | result-relay defect | ineligible |
@@ -286,6 +289,8 @@ The sanitized package is the durable audit artifact and may be version-controlle
 5. A0 invocation does not ask the advisor to select a route. Advisor output, if recorded, is provenance only and cannot override the predeclared route.
 6. Telemetry, scorecards, capture health, or recommendations cannot trigger route promotion, quarantine change, exploration, or fallback for an A0 Run.
 7. An invocation not carrying capture proof for this seam cannot enter A0, even if it used the same Codex command manually.
+8. `--output-last-message <FILE>` is the one currently proposed and permitted result-channel addition to the inner `EXEC_STRONG` Codex command for capture. It must not silently change model, reasoning effort, authentication mode, sandbox, account identity, jail/containment, timeout semantics, route economics, or acceptance semantics.
+9. The A0 invocation snapshot is frozen only after P0 and the reviewed capture/result-relay implementation have landed and passed review, and before the first decision-grade A0 Run. The frozen command is therefore the post-capture reviewed invocation.
 
 ## Corpus and Freeze Prerequisites
 
@@ -324,10 +329,10 @@ The frozen A0 baseline is complete only with:
 - all four predeclared fault/negative scenarios:
   1. Windows path/encoding/locked-file;
   2. cancellation with a long-running descendant process;
-  3. provider/authentication failure;
+  3. real executor timeout during governed work;
   4. negative-control WorkUnit whose correct outcome is blocked/no edit.
 
-Overlap is allowed only when legitimate and declared before execution. A successful Windows/path case may also count among the ten. Cancellation, authentication failure, and blocked negative control normally do not. Capture conformance fixtures such as generic timeout, nonzero exit, or missing result do not substitute for these benchmark scenarios.
+Overlap is allowed only when legitimate and declared before execution. A successful Windows/path case may also count among the ten. Cancellation, real timeout, and blocked negative control normally do not. Synthetic timeout, nonzero exit, result missing, result malformed, result schema invalid, relay failure, and capture-persistence conformance do not substitute for the four decision-grade scenarios. Authentication/preflight refusal is a pre-launch control-plane case, not a launched-Run benchmark scenario, and must not be manufactured for measurement.
 
 The baseline completion gate counts distinct eligible `run_id` values from retained evidence, not historical directories or the reducer's label alone. Multiple Runs for one WorkUnit remain separately captured but cannot inflate a matched comparison unless the frozen corpus design explicitly permits and discloses that sampling rule.
 
@@ -350,7 +355,7 @@ P0 must be merged and validated before corpus execution begins if correction/res
 2. Adopt the WorkUnit packet's `run_id` before launch and reject reuse for a new launch.
 3. Keep WorkUnit and Run as the domain hierarchy; do not introduce `Attempt`.
 4. Keep `result.schema.json` unchanged. Bind result and validation through a separate Run-owned manifest and digests.
-5. Use a dedicated terminal-result channel for authoritative result relay; do not treat arbitrary JSONL stdout or the rollout as the result.
+5. Add only `--output-last-message <FILE>` as the proposed candidate terminal-result channel, gated by V8 successful-artifact verification; do not treat that candidate, arbitrary JSONL stdout, or the rollout as an authoritative result before parse, schema validation, and promotion.
 6. Capture `thread.started.thread_id` and require exact equality with rollout session metadata; prohibit heuristics.
 7. Reuse the current rollout usage adapter; do not add a duplicate direct-stdout usage adapter.
 8. Separate execution recording from later validation recording. Pending validation is represented by null/absent outcome booleans in canonical metrics.
@@ -404,6 +409,7 @@ Required coverage:
 31. Blocked/no-edit negative control preserves zero edits and the expected stopped validation disposition.
 32. Capture/conformance fixtures are reported separately from the four benchmark special scenarios.
 33. A complete synthetic baseline manifest cannot pass with fewer than ten eligible completed Run IDs or any missing special scenario.
+34. Mandatory preflight refusal, including unavailable subscription authentication, is recorded as pre-launch control evidence and never as an executor failure or benchmark Run.
 
 Prior art is the repository's existing conformance runner, validator fixtures, telemetry resilience checks, route-advisor checks, sanitizer fixtures, and evidence-bundle validator. New scenarios should extend these high-level seams rather than duplicate their enforcement logic.
 
@@ -413,11 +419,12 @@ Prior art is the repository's existing conformance runner, validator fixtures, t
 2. Specify, implement, review, and hand off P0 separately.
 3. Derive narrow capture WorkUnits only after this specification is approved; preserve dependency ordering but do not assume U1–U5 boundaries are final.
 4. Run synthetic lifecycle and persistence conformance without provider work.
-5. Run one explicitly authorized non-benchmark smoke Run through `EXEC_STRONG` to verify exact current CLI/session behavior and evidence sanitization; do not count it as A0 unless it was frozen in advance under the corpus procedure.
-6. Verify P0 and capture work are both merged and validated.
-7. Freeze corpus, validation standard, environment/config provenance, and model-facing instructions.
-8. Start A0 at zero measured Runs and admit only Runs passing every eligibility and evidence gate.
-9. Freeze the completed baseline only after ledger integrity and evidence-package validation pass.
+5. After operator-restored authentication, complete the V8 successful-artifact gate before implementing or exercising the result relay.
+6. Run one explicitly authorized non-benchmark smoke Run through `EXEC_STRONG` to verify exact current CLI/session behavior and evidence sanitization; do not count it as A0 unless it was frozen in advance under the corpus procedure.
+7. Verify P0 and capture work are both merged and validated.
+8. Freeze the post-capture reviewed invocation, corpus, validation standard, environment/config provenance, and model-facing instructions.
+9. Start A0 at zero measured Runs and admit only Runs passing every eligibility and evidence gate.
+10. Freeze the completed baseline only after ledger integrity and evidence-package validation pass.
 
 ## Rollback
 
@@ -440,7 +447,7 @@ Rollback does not change executor result semantics, validator behavior, route ec
 3. The emitted `thread.started.thread_id` is captured and exactly bound to that Run before substantive lifecycle events.
 4. No newest-session, cwd, timestamp-proximity, or other heuristic session matching exists.
 5. The exact bound rollout supplies supported usage where available, and missing usage changes only accounting/capture health.
-6. The executor's dedicated terminal result reaches the validator's existing input location through a deterministic, digest-bound production relay.
+6. The executor's `--output-last-message <FILE>` candidate reaches the validator's existing input location only through JSON parsing, unchanged result-schema validation, and deterministic digest-bound promotion.
 7. The existing result schema and validator semantics remain unchanged.
 8. Validation may remain pending indefinitely without becoming failure or entering validated-success denominators.
 9. One intended validation invocation executes the validator exactly once.
@@ -456,7 +463,7 @@ Rollback does not change executor result semantics, validator behavior, route ec
 19. Canonical ledger integrity is checked before reduction, scorecard generation, and baseline freeze.
 20. Corpus preflight enforces one frozen validation standard.
 21. Baseline completion requires at least ten distinct eligible automatically captured completed Runs plus all four declared special scenarios.
-22. The four scenarios remain Windows path/encoding/locked-file, descendant cancellation, provider/auth failure, and blocked/no-edit negative control.
+22. The four scenarios remain Windows path/encoding/locked-file, descendant cancellation, real executor timeout during governed work, and blocked/no-edit negative control.
 23. Historical executions and artifacts contribute zero measured A0 Runs.
 24. The completed A0 package contains enough frozen WorkUnit, environment, instruction, result, validation, usage, and provenance evidence to support a fair later A2 replay without claiming provider internals or historical measurements that were not captured.
 
@@ -478,6 +485,7 @@ Rollback does not change executor result semantics, validator behavior, route ec
 - Metaprompter.
 - A2 route/schema changes or benchmark execution.
 - Public execution-event streams.
+- Deterministic production packet materialization or a packet generator; packet creation remains manual/orchestrator-side.
 - Corpus selection/finalization beyond defining the freeze procedure and acceptance gate.
 - Committing raw telemetry, full Codex rollouts, raw provider payloads, or quarantine bytes.
 - Tickets, implementation, A0 collection, PR publication, or deployment.
@@ -487,7 +495,7 @@ Rollback does not change executor result semantics, validator behavior, route ec
 ### Before `/to-tickets`
 
 - Claude/Coviber approval of this specification.
-- No additional architecture decision is currently required.
+- V8 successful-artifact verification may remain open for ticketing, but blocks implementation of any result-relay ticket that depends on `--output-last-message <FILE>`.
 
 ### Before A0 collection
 
