@@ -1,8 +1,12 @@
 # A0 capture implementation packets
 
-These packets decompose the reviewed A0 capture specification at commit
-`5e49f41ac03d2279ddc4e33cb7058d22f14e2ae1`. They are planning artifacts,
-not authorization to implement or collect A0.
+These packets decompose the draft A0 capture specification at commit
+`5e49f41ac03d2279ddc4e33cb7058d22f14e2ae1`. They are non-authoritative
+planning artifacts, not authorization to materialize, implement, or collect A0.
+
+The specification remains pending Claude/Coviber review. Until that approval is
+explicitly recorded, review is the next workflow step and these packets must not
+be used as implementation authority.
 
 All packets are `change_class: behavior`, use `EXEC_STRONG`, and are based on
 source revision `d0409936005d2161ae10f3ce1d08a3b9eaaf5854`. Refreshing a packet's
