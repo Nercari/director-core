@@ -9,6 +9,7 @@ acceptance_criteria:
   - Running two concurrent claim processes for the same run_id prints exactly one winner and one duplicate refusal, and inspection shows one durable claim record.
   - Running recovery for a claimed run_id reopens its record without creating a launch marker or a second claim.
   - Supplying a missing or empty run_id exits nonzero before any executor fixture starts.
+  - "Supplying an unknown --case value exits nonzero and names the unknown case on stderr; no case body executes, and the invocation does not fall back to the script's default all-cases behavior. Whenever --case is supplied, the only case that runs is the explicitly selected implemented one."
 allowed_paths:
   - scripts/capture/run_claim.py
   - scripts/capture/run_claim_selfcheck.py
@@ -20,7 +21,7 @@ forbidden_paths:
 required_tests:
   - python scripts/capture/run_claim_selfcheck.py
 behavior_check: >-
-  COMMAND: python scripts/capture/run_claim_selfcheck.py --case duplicate;
+  COMMAND (Git Bash): python scripts/capture/run_claim_selfcheck.py --case duplicate;
   WATCH: the first claim prints CLAIMED, the second prints DUPLICATE with the same run_id,
   and the summary reports one durable claim and one launch marker.
 constraints:

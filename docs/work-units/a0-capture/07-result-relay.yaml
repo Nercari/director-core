@@ -10,6 +10,7 @@ acceptance_criteria:
   - Every failed fixture leaves the authoritative result absent and prints validation_not_started.
   - Inspection of result.schema.json before and after the behavior check shows identical bytes and no run_id field.
   - The invocation fixture displays --output-last-message as the only change to the pinned inner Codex command fields.
+  - "Supplying an unknown --case value exits nonzero and names the unknown case on stderr; no case body executes, and the invocation does not fall back to the script's default all-cases behavior. Whenever --case is supplied, the only case that runs is the explicitly selected implemented one."
 allowed_paths:
   - scripts/capture/result_relay.py
   - scripts/capture/result_relay_selfcheck.py
@@ -24,7 +25,7 @@ forbidden_paths:
 required_tests:
   - python scripts/capture/result_relay_selfcheck.py
 behavior_check: >-
-  COMMAND: python scripts/capture/result_relay_selfcheck.py --case malformed;
+  COMMAND (Git Bash): python scripts/capture/result_relay_selfcheck.py --case malformed;
   WATCH: the Run prints result_malformed, no authoritative result is created,
   validation_not_started is printed, and the synthetic executor outcome is unchanged.
 constraints:

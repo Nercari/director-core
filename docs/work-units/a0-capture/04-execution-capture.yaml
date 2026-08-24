@@ -10,6 +10,7 @@ acceptance_criteria:
   - A capture-persistence failure leaves the synthetic executor exit code unchanged, prints capture_incomplete, and makes the Run ineligible.
   - A mandatory preflight refusal prints not_launched and no governed executor launch marker exists.
   - Supplying a route other than the packet's EXEC_STRONG value refuses before launch and prints both expected and observed route values.
+  - "Supplying an unknown --case value exits nonzero and names the unknown case on stderr; no case body executes, and the invocation does not fall back to the script's default all-cases behavior. Whenever --case is supplied, the only case that runs is the explicitly selected implemented one."
 allowed_paths:
   - scripts/capture/execution.py
   - scripts/capture/execution_selfcheck.py
@@ -24,7 +25,7 @@ forbidden_paths:
 required_tests:
   - python scripts/capture/execution_selfcheck.py
 behavior_check: >-
-  COMMAND: python scripts/capture/execution_selfcheck.py --case capture-failure;
+  COMMAND (Git Bash): python scripts/capture/execution_selfcheck.py --case capture-failure;
   WATCH: the synthetic executor exits with its configured code, the Run prints capture_incomplete,
   and the output contains no route-selection, validation, promotion, or merge action.
 constraints:

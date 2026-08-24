@@ -9,6 +9,21 @@ source revision `d0409936005d2161ae10f3ce1d08a3b9eaaf5854`. Refreshing a packet'
 base at execution time requires a reviewed packet update; it must not be done
 silently.
 
+## Packet materialization and review order
+
+1. Run the reviewed `bash scripts/worktree.sh create <unit-id>` command.
+2. Record the `base_commit` reported in `.director/runs/<unit-id>/worktree.yaml`.
+3. Materialize the packet from that worktree only after the reported base is
+   available.
+4. Review the materialized packet, then run work-unit schema validation; both
+   precede implementation.
+5. Stop if the run record's `base_commit` does not match the packet's
+   `base_commit`; do not continue on a mismatch.
+
+Materialization is a reviewed packet update, not a silent base refresh.
+
+`worktree.sh resume` is only for continuing work on the same already-reviewed existing unit/branch. It is not a mechanism for materializing a new packet, refreshing a packet base, or silently updating `base_commit`.
+
 ## Dependency order
 
 1. `a0-cap-01-run-claim` — none

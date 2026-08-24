@@ -10,6 +10,7 @@ acceptance_criteria:
   - Changing advisor output, exploration percentage, or populated telemetry in fixtures does not change the displayed actual route from EXEC_STRONG.
   - Existing model Write/Edit guard self-tests produce the same decisions before and after the change, while a host-side fixture can persist capture evidence.
   - Inspection of the accepted invocation shows the route registry and capture proof, not command-substring matching, caused admission.
+  - "Supplying an unknown --case value exits nonzero and names the unknown case on stderr; no case body executes, and the invocation does not fall back to the script's default all-cases behavior. Whenever --case is supplied, the only case that runs is the explicitly selected implemented one."
 allowed_paths:
   - scripts/capture/admission.py
   - scripts/capture/admission_selfcheck.py
@@ -26,7 +27,7 @@ required_tests:
   - python scripts/capture/admission_selfcheck.py
   - python scripts/conformance.py
 behavior_check: >-
-  COMMAND: python scripts/capture/admission_selfcheck.py --case direct-bypass;
+  COMMAND (Git Bash): python scripts/capture/admission_selfcheck.py --case direct-bypass;
   WATCH: the registered captured invocation prints admitted with a proof identifier,
   the direct legacy invocation prints bypass_detected, and both display EXEC_STRONG as the requested route.
 constraints:

@@ -10,6 +10,7 @@ acceptance_criteria:
   - Zero or multiple exact rollout matches print accounting_unavailable with a reason and do not append authoritative usage.
   - Missing, partial, malformed, disappearing, and still-growing rollout fixtures print partial or unavailable accounting while preserving the configured executor and validation outcomes.
   - Re-ingesting the same bound usage source leaves one canonical usage fact.
+  - "Supplying an unknown --case value exits nonzero and names the unknown case on stderr; no case body executes, and the invocation does not fall back to the script's default all-cases behavior. Whenever --case is supplied, the only case that runs is the explicitly selected implemented one."
 allowed_paths:
   - scripts/telemetry/ingest.py
   - scripts/telemetry/resilience_selfcheck.py
@@ -22,7 +23,7 @@ required_tests:
   - python scripts/capture/rollout_binding_selfcheck.py
   - python scripts/telemetry/resilience_selfcheck.py
 behavior_check: >-
-  COMMAND: python scripts/capture/rollout_binding_selfcheck.py --case exact-over-newer;
+  COMMAND (Git Bash): python scripts/capture/rollout_binding_selfcheck.py --case exact-over-newer;
   WATCH: the exact thread-matching rollout supplies the displayed usage totals,
   the newer nonmatching rollout is reported ignored, and one canonical usage fact exists.
 constraints:

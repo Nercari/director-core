@@ -10,6 +10,7 @@ acceptance_criteria:
   - Retrying ledger persistence after a simulated append failure reads the durable receipt, prints repaired, and leaves the validator invocation counter at one.
   - Exit-message mismatch, validator launch failure, and crash fixtures print validation_incomplete rather than pass or fail.
   - Validator stdout, stderr, exit code, and evidence fixture bytes remain available in the receipt.
+  - "Supplying an unknown --case value exits nonzero and names the unknown case on stderr; no case body executes, and the invocation does not fall back to the script's default all-cases behavior. Whenever --case is supplied, the only case that runs is the explicitly selected implemented one."
 allowed_paths:
   - scripts/capture/validation.py
   - scripts/capture/validation_selfcheck.py
@@ -20,7 +21,7 @@ forbidden_paths:
 required_tests:
   - python scripts/capture/validation_selfcheck.py
 behavior_check: >-
-  COMMAND: python scripts/capture/validation_selfcheck.py --case retry-after-ledger-failure;
+  COMMAND (Git Bash): python scripts/capture/validation_selfcheck.py --case retry-after-ledger-failure;
   WATCH: the first invocation records one validator receipt, the retry prints repaired from receipt,
   and the displayed validator invocation count remains exactly one.
 constraints:

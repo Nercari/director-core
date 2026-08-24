@@ -10,6 +10,7 @@ acceptance_criteria:
   - Missing, unreadable, moved, and digest-changed referent fixtures print distinct freeze refusal reasons.
   - A capture-incomplete package remains retained for diagnosis but the freeze command prints A0_ineligible.
   - Re-running freeze for the same unchanged package reports the existing retained identity and creates no duplicate retained artifact.
+  - "Supplying an unknown --case value exits nonzero and names the unknown case on stderr; no case body executes, and the invocation does not fall back to the script's default all-cases behavior. Whenever --case is supplied, the only case that runs is the explicitly selected implemented one."
 allowed_paths:
   - scripts/capture/evidence_freeze.py
   - scripts/capture/evidence_freeze_selfcheck.py
@@ -21,7 +22,7 @@ forbidden_paths:
 required_tests:
   - python scripts/capture/evidence_freeze_selfcheck.py
 behavior_check: >-
-  COMMAND: python scripts/capture/evidence_freeze_selfcheck.py --case bare-digest;
+  COMMAND (Git Bash): python scripts/capture/evidence_freeze_selfcheck.py --case bare-digest;
   WATCH: the command prints missing_referent and A0_ineligible,
   and no freeze-complete marker or duplicate retained artifact is created.
 constraints:

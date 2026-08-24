@@ -11,6 +11,8 @@ acceptance_criteria:
   - Retry scenarios leave one launch claim, one canonical fact per identity, and one validator invocation.
   - Direct invocation without capture proof prints bypass_detected and never enters the synthetic A0 count.
   - The final report names unresolved external gates for Codex/GH authentication, V8, P0, and real A0 scenario collection without executing any of them.
+  - The new A0 lifecycle scenarios join the no-argument conformance run without removing any prior scenarios.
+  - 'Scenario selection fails closed: selecting `--scenario a0-capture-lifecycle` runs only that scenario; an unknown scenario is rejected nonzero without running a default scenario.'
 allowed_paths:
   - scripts/conformance.py
   - tests/a0-capture/success.json
@@ -27,7 +29,7 @@ forbidden_paths:
 required_tests:
   - python scripts/conformance.py
 behavior_check: >-
-  COMMAND: python scripts/conformance.py --scenario a0-capture-lifecycle;
+  COMMAND (Git Bash): python scripts/conformance.py --scenario a0-capture-lifecycle;
   WATCH: the report shows one successful correlated synthetic Run, distinct rows for every required failure state,
   one validator invocation after retry, and zero real A0 Runs collected.
 constraints:

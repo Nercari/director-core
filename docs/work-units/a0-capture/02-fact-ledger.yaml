@@ -10,6 +10,7 @@ acceptance_criteria:
   - Replaying an already ingested source after process restart leaves the ledger and index byte counts unchanged and reports the existing fact identity.
   - The crash-after-ledger fixture is detected on restart and repairs or reports the index state without appending a second canonical fact.
   - Two records with the same identity but different content produce a visible conflict error and neither is silently selected as authoritative.
+  - "Supplying an unknown --case value exits nonzero and names the unknown case on stderr; no case body executes, and the invocation does not fall back to the script's default all-cases behavior. Whenever --case is supplied, the only case that runs is the explicitly selected implemented one."
 allowed_paths:
   - scripts/telemetry/ingest.py
   - scripts/telemetry/resilience_selfcheck.py
@@ -19,8 +20,9 @@ forbidden_paths:
   - scripts/validate-result.sh
 required_tests:
   - python scripts/telemetry/resilience_selfcheck.py
+  - python scripts/telemetry/resilience_selfcheck.py --case duplicate-concurrent-fact
 behavior_check: >-
-  COMMAND: python scripts/telemetry/resilience_selfcheck.py --case duplicate-concurrent-fact;
+  COMMAND (Git Bash): python scripts/telemetry/resilience_selfcheck.py --case duplicate-concurrent-fact;
   WATCH: both writers terminate, the summary names one accepted fact and one duplicate,
   and the displayed canonical ledger count is exactly one.
 constraints:

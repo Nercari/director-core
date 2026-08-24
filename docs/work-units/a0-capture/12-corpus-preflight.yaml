@@ -10,10 +10,13 @@ acceptance_criteria:
   - Adding historical result artifacts or preflight-refusal records does not increase the displayed measured Run count.
   - Route drift, capture-incomplete evidence, malformed ledger, missing retained evidence, missing instruction provenance, and undeclared scenario overlap each block completion with a named reason.
   - The successful summary prints EXEC_STRONG, one validation standard, the post-capture invocation digest, and zero historical Runs counted.
+  - "Supplying an unknown --case value exits nonzero and names the unknown case on stderr; no case body executes, and the invocation does not fall back to the script's default all-cases behavior. Whenever --case is supplied, the only case that runs is the explicitly selected implemented one."
+  - CI's no-argument `python scripts/conformance.py` run exercises the corpus preflight and the `examples/a0-corpus` sanitizer.
 allowed_paths:
   - schemas/a0-corpus.schema.json
   - scripts/a0_corpus_preflight.py
   - scripts/a0_corpus_preflight_selfcheck.py
+  - scripts/conformance.py
   - examples/a0-corpus/complete.valid.json
   - examples/a0-corpus/missing-scenario.invalid.json
   - examples/a0-corpus/mixed-standard.invalid.json
@@ -24,8 +27,9 @@ forbidden_paths:
   - scripts/validate-result.sh
 required_tests:
   - python scripts/a0_corpus_preflight_selfcheck.py
+  - bash scripts/check-example-sanitization.sh examples/a0-corpus
 behavior_check: >-
-  COMMAND: python scripts/a0_corpus_preflight_selfcheck.py --case historical-and-preflight-excluded;
+  COMMAND (Git Bash): python scripts/a0_corpus_preflight_selfcheck.py --case historical-and-preflight-excluded;
   WATCH: the summary counts only eligible measured Runs, displays zero historical/preflight records counted,
   and refuses completion until ten completed Runs plus all four declared scenarios are present.
 constraints:

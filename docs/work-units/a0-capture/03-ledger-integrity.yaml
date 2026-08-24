@@ -10,6 +10,7 @@ acceptance_criteria:
   - Running integrity preflight on a torn final line prints RED and neither rewrites nor truncates the fixture.
   - Invoking the reduction wrapper with a RED integrity result refuses before producing metrics or scorecard output.
   - Running the index-divergence fixture prints the conflicting fact identity and blocks freeze.
+  - "Supplying an unknown --case value exits nonzero and names the unknown case on stderr; no case body executes, and the invocation does not fall back to the script's default all-cases behavior. Whenever --case is supplied, the only case that runs is the explicitly selected implemented one."
 allowed_paths:
   - scripts/telemetry/ledger_integrity.py
   - scripts/telemetry/ledger_integrity.sh
@@ -21,7 +22,7 @@ forbidden_paths:
 required_tests:
   - python scripts/telemetry/ledger_integrity_selfcheck.py
 behavior_check: >-
-  COMMAND: python scripts/telemetry/ledger_integrity_selfcheck.py --case malformed-before-reduce;
+  COMMAND (Git Bash): python scripts/telemetry/ledger_integrity_selfcheck.py --case malformed-before-reduce;
   WATCH: the command prints the malformed line number, prints RED, creates no metrics or
   scorecard artifact, and confirms the input ledger bytes were not changed.
 constraints:
