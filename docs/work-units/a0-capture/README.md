@@ -13,12 +13,16 @@ silently.
 
 1. Run the reviewed `bash scripts/worktree.sh create <unit-id>` command.
 2. Record the `base_commit` reported in `.director/runs/<unit-id>/worktree.yaml`.
-3. Materialize the packet from that worktree only after the reported base is
-   available.
-4. Review the materialized packet, then run work-unit schema validation; both
-   precede implementation.
-5. Stop if the run record's `base_commit` does not match the packet's
-   `base_commit`; do not continue on a mismatch.
+3. After the reported base matches the reviewed packet's `base_commit`, the
+   orchestrator materializes `.director/runs/<unit-id>/packet.yaml` in the owned
+   main repository from the exact reviewed Git blob at the endorsed planning
+   commit. The implementation worktree is not the packet source, and no packet
+   field is rewritten.
+4. Verify that the materialized packet is byte-identical to the reviewed Git
+   blob, validate it against `schemas/work-unit.schema.json`, and confirm that
+   its `base_commit` equals the run record's `base_commit`.
+5. Only after all checks pass is implementation authorized. Stop on any
+   mismatch or validation failure.
 
 Materialization is a reviewed packet update, not a silent base refresh.
 
