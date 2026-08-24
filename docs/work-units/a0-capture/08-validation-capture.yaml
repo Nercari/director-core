@@ -1,0 +1,35 @@
+run_id: a0-cap-07-validation-capture
+unit_id: a0-cap-07-validation-capture
+base_commit: d0409936005d2161ae10f3ce1d08a3b9eaaf5854
+change_class: behavior
+route: EXEC_STRONG
+objective: Invoke the unchanged validator once per intended validation invocation and persist its outcome from a durable receipt without rerunning side effects during repair.
+acceptance_criteria:
+  - Before explicit validation, inspecting the Run prints validation_pending and the validated-success denominator fixture remains unchanged.
+  - Pass, reject, and stopped fixtures each invoke the validator process once and print their normalized disposition with captured exit code and terminal grammar.
+  - Retrying ledger persistence after a simulated append failure reads the durable receipt, prints repaired, and leaves the validator invocation counter at one.
+  - Exit-message mismatch, validator launch failure, and crash fixtures print validation_incomplete rather than pass or fail.
+  - Validator stdout, stderr, exit code, and evidence fixture bytes remain available in the receipt.
+  - "Supplying an unknown --case value exits nonzero and names the unknown case on stderr; no case body executes, and the invocation does not fall back to the script's default all-cases behavior. Whenever --case is supplied, the only case that runs is the explicitly selected implemented one."
+allowed_paths:
+  - scripts/capture/validation.py
+  - scripts/capture/validation_selfcheck.py
+  - scripts/conformance.py
+forbidden_paths:
+  - scripts/validate-result.sh
+  - schemas/result.schema.json
+required_tests:
+  - python scripts/capture/validation_selfcheck.py
+behavior_check: >-
+  COMMAND (Git Bash): python scripts/capture/validation_selfcheck.py --case retry-after-ledger-failure;
+  WATCH: the first invocation records one validator receipt, the retry prints repaired from receipt,
+  and the displayed validator invocation count remains exactly one.
+constraints:
+  - Depends on a0-cap-01-run-claim, a0-cap-02-fact-ledger, and a0-cap-06-result-relay.
+  - Preserve validator process behavior, output grammar, exit codes, tests, and evidence semantics.
+stop_conditions:
+  - Stop if any persistence retry invokes the validator again.
+output_contract:
+  modified_files: required
+  evidence_bundle: required
+  result_json: required

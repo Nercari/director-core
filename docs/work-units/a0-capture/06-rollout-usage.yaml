@@ -1,0 +1,37 @@
+run_id: a0-cap-05-rollout-usage
+unit_id: a0-cap-05-rollout-usage
+base_commit: d0409936005d2161ae10f3ce1d08a3b9eaaf5854
+change_class: behavior
+route: EXEC_STRONG
+objective: Ingest supported usage only from the rollout exactly bound to run_id and thread_id while keeping accounting completeness separate from execution and validation.
+acceptance_criteria:
+  - The exact-match fixture prints the same run_id, thread_id, rollout session identity, and normalized token totals in one canonical record.
+  - A newer nonmatching rollout is not read or selected when one exact matching rollout exists.
+  - Zero or multiple exact rollout matches print accounting_unavailable with a reason and do not append authoritative usage.
+  - Missing, partial, malformed, disappearing, and still-growing rollout fixtures print partial or unavailable accounting while preserving the configured executor and validation outcomes.
+  - Re-ingesting the same bound usage source leaves one canonical usage fact.
+  - "Supplying an unknown --case value exits nonzero and names the unknown case on stderr; no case body executes, and the invocation does not fall back to the script's default all-cases behavior. Whenever --case is supplied, the only case that runs is the explicitly selected implemented one."
+allowed_paths:
+  - scripts/telemetry/ingest.py
+  - scripts/telemetry/resilience_selfcheck.py
+  - scripts/capture/rollout_binding.py
+  - scripts/capture/rollout_binding_selfcheck.py
+forbidden_paths:
+  - scripts/telemetry/reduce.py
+  - schemas/result.schema.json
+required_tests:
+  - python scripts/capture/rollout_binding_selfcheck.py
+  - python scripts/telemetry/resilience_selfcheck.py
+behavior_check: >-
+  COMMAND (Git Bash): python scripts/capture/rollout_binding_selfcheck.py --case exact-over-newer;
+  WATCH: the exact thread-matching rollout supplies the displayed usage totals,
+  the newer nonmatching rollout is reported ignored, and one canonical usage fact exists.
+constraints:
+  - Depends on a0-cap-02-fact-ledger and a0-cap-04-thread-binding.
+  - Reuse the existing Codex rollout usage adapter; do not add a direct stdout usage adapter.
+stop_conditions:
+  - Stop if usage attribution requires newest-file, cwd, or timestamp matching.
+output_contract:
+  modified_files: required
+  evidence_bundle: required
+  result_json: required

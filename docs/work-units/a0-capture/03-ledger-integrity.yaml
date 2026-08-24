@@ -1,0 +1,37 @@
+run_id: a0-cap-02-ledger-integrity
+unit_id: a0-cap-02-ledger-integrity
+base_commit: d0409936005d2161ae10f3ce1d08a3b9eaaf5854
+change_class: behavior
+route: EXEC_STRONG
+objective: Refuse reduction and baseline freeze when the canonical invocation ledger contains malformed, torn, or index-inconsistent state.
+acceptance_criteria:
+  - Running integrity preflight on a valid fixture prints GREEN with the inspected row count and exits zero.
+  - Running integrity preflight on a ledger with one malformed line prints RED with its line number and exits nonzero.
+  - Running integrity preflight on a torn final line prints RED and neither rewrites nor truncates the fixture.
+  - Invoking the reduction wrapper with a RED integrity result refuses before producing metrics or scorecard output.
+  - Running the index-divergence fixture prints the conflicting fact identity and blocks freeze.
+  - "Supplying an unknown --case value exits nonzero and names the unknown case on stderr; no case body executes, and the invocation does not fall back to the script's default all-cases behavior. Whenever --case is supplied, the only case that runs is the explicitly selected implemented one."
+allowed_paths:
+  - scripts/telemetry/ledger_integrity.py
+  - scripts/telemetry/ledger_integrity.sh
+  - scripts/telemetry/ledger_integrity_selfcheck.py
+  - scripts/telemetry/reduce.sh
+forbidden_paths:
+  - scripts/telemetry/reduce.py
+  - scripts/telemetry/ingest.py
+required_tests:
+  - python scripts/telemetry/ledger_integrity_selfcheck.py
+behavior_check: >-
+  COMMAND (Git Bash): python scripts/telemetry/ledger_integrity_selfcheck.py --case malformed-before-reduce;
+  WATCH: the command prints the malformed line number, prints RED, creates no metrics or
+  scorecard artifact, and confirms the input ledger bytes were not changed.
+constraints:
+  - Depends on a0-cap-02-fact-ledger.
+  - Do not redesign reducer malformed-line recovery semantics.
+  - The integrity command is a gate before reduction, scorecard generation, and freeze.
+stop_conditions:
+  - Stop if a malformed canonical line can reach the reducer as an accepted baseline input.
+output_contract:
+  modified_files: required
+  evidence_bundle: required
+  result_json: required

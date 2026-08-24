@@ -1,0 +1,35 @@
+run_id: a0-cap-04-thread-binding
+unit_id: a0-cap-04-thread-binding
+base_commit: d0409936005d2161ae10f3ce1d08a3b9eaaf5854
+change_class: behavior
+route: EXEC_STRONG
+objective: Bind one claimed Director Run to the exact Codex thread.started.thread_id before accepting later session evidence.
+acceptance_criteria:
+  - A lifecycle fixture whose first valid event is thread.started prints the exact thread_id beside the packet run_id and marks binding complete.
+  - Missing, empty, duplicate, conflicting, or late thread identifiers print binding_defect and make the fixture Run ineligible.
+  - A fixture containing one exact thread plus a newer nonmatching session prints the exact identifier and never prints the newer session as selected.
+  - The binding record prints the declared Codex CLI version used to interpret the event vocabulary.
+  - "Supplying an unknown --case value exits nonzero and names the unknown case on stderr; no case body executes, and the invocation does not fall back to the script's default all-cases behavior. Whenever --case is supplied, the only case that runs is the explicitly selected implemented one."
+allowed_paths:
+  - scripts/capture/thread_binding.py
+  - scripts/capture/thread_binding_selfcheck.py
+  - scripts/capture/execution.py
+  - scripts/conformance.py
+forbidden_paths:
+  - scripts/telemetry/ingest.py
+  - .director/routes.yaml
+required_tests:
+  - python scripts/capture/thread_binding_selfcheck.py
+behavior_check: >-
+  COMMAND (Git Bash): python scripts/capture/thread_binding_selfcheck.py --case exact-over-newest;
+  WATCH: the output selects the rollout identity equal to thread.started.thread_id,
+  rejects the newer nonmatching candidate, and reports no cwd or timestamp fallback.
+constraints:
+  - Depends on a0-cap-03-execution-capture.
+  - Newest-file, cwd, timestamp-proximity, and most-recent-session matching are prohibited.
+stop_conditions:
+  - Stop if exact binding cannot be established without a heuristic fallback.
+output_contract:
+  modified_files: required
+  evidence_bundle: required
+  result_json: required

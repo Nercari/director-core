@@ -1,0 +1,44 @@
+run_id: a0-cap-11-lifecycle-conformance
+unit_id: a0-cap-11-lifecycle-conformance
+base_commit: d0409936005d2161ae10f3ce1d08a3b9eaaf5854
+change_class: behavior
+route: EXEC_STRONG
+objective: Prove with synthetic processes that the complete A0 capture lifecycle composes while execution outcome, validation state, capture health, and A0 eligibility remain independent.
+acceptance_criteria:
+  - The synthetic success scenario prints one run_id through claim, execution, exact thread binding, result promotion, pending validation, one validation receipt, usage, evidence freeze, and eligibility.
+  - Preflight refusal prints not_launched and creates no executor telemetry fact or measured Run.
+  - Generic timeout, executor nonzero, result missing, result malformed, result schema invalid, relay failure, capture persistence failure, and malformed ledger each print a distinct terminal classification.
+  - Retry scenarios leave one launch claim, one canonical fact per identity, and one validator invocation.
+  - Direct invocation without capture proof prints bypass_detected and never enters the synthetic A0 count.
+  - The final report names unresolved external gates for Codex/GH authentication, V8, P0, and real A0 scenario collection without executing any of them.
+  - The new A0 lifecycle scenarios join the no-argument conformance run without removing any prior scenarios.
+  - 'Scenario selection fails closed: selecting `--scenario a0-capture-lifecycle` runs only that scenario; an unknown scenario is rejected nonzero without running a default scenario.'
+allowed_paths:
+  - scripts/conformance.py
+  - tests/a0-capture/success.json
+  - tests/a0-capture/preflight-refused.json
+  - tests/a0-capture/timeout.json
+  - tests/a0-capture/result-failures.json
+  - tests/a0-capture/persistence-failures.json
+forbidden_paths:
+  - scripts/preflight.sh
+  - scripts/worktree.sh
+  - scripts/validate-result.sh
+  - .director/routes.yaml
+  - .telemetry/routing-policy.yaml
+required_tests:
+  - python scripts/conformance.py
+behavior_check: >-
+  COMMAND (Git Bash): python scripts/conformance.py --scenario a0-capture-lifecycle;
+  WATCH: the report shows one successful correlated synthetic Run, distinct rows for every required failure state,
+  one validator invocation after retry, and zero real A0 Runs collected.
+constraints:
+  - Depends on a0-cap-05-rollout-usage, a0-cap-06-result-relay, a0-cap-07-validation-capture, a0-cap-08-capture-coverage, and a0-cap-10-corpus-preflight.
+  - Use synthetic executors and validators only; do not invoke a real provider or WorkUnit.
+  - P0 remains outside this packet set.
+stop_conditions:
+  - Stop if completing conformance requires live authentication, a real executor, runtime P0 changes, or A0 collection.
+output_contract:
+  modified_files: required
+  evidence_bundle: required
+  result_json: required

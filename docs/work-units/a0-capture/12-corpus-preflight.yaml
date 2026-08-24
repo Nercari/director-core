@@ -1,0 +1,44 @@
+run_id: a0-cap-10-corpus-preflight
+unit_id: a0-cap-10-corpus-preflight
+base_commit: d0409936005d2161ae10f3ce1d08a3b9eaaf5854
+change_class: behavior
+route: EXEC_STRONG
+objective: Validate frozen A0 corpus provenance and compute Run eligibility and baseline completion without counting historical artifacts or preflight refusals as measured Runs.
+acceptance_criteria:
+  - A complete synthetic manifest prints at least ten distinct eligible completed run_id values and confirms all four declared scenarios.
+  - Removing any one special scenario, reducing eligible completed Runs below ten, or using mixed validation standards prints the failed gate and exits nonzero.
+  - Adding historical result artifacts or preflight-refusal records does not increase the displayed measured Run count.
+  - Route drift, capture-incomplete evidence, malformed ledger, missing retained evidence, missing instruction provenance, and undeclared scenario overlap each block completion with a named reason.
+  - The successful summary prints EXEC_STRONG, one validation standard, the post-capture invocation digest, and zero historical Runs counted.
+  - "Supplying an unknown --case value exits nonzero and names the unknown case on stderr; no case body executes, and the invocation does not fall back to the script's default all-cases behavior. Whenever --case is supplied, the only case that runs is the explicitly selected implemented one."
+  - CI's no-argument `python scripts/conformance.py` run exercises the corpus preflight and the `examples/a0-corpus` sanitizer.
+allowed_paths:
+  - schemas/a0-corpus.schema.json
+  - scripts/a0_corpus_preflight.py
+  - scripts/a0_corpus_preflight_selfcheck.py
+  - scripts/conformance.py
+  - examples/a0-corpus/complete.valid.json
+  - examples/a0-corpus/missing-scenario.invalid.json
+  - examples/a0-corpus/mixed-standard.invalid.json
+forbidden_paths:
+  - .director/routes.yaml
+  - .telemetry/routing-policy.yaml
+  - scripts/worktree.sh
+  - scripts/validate-result.sh
+required_tests:
+  - python scripts/a0_corpus_preflight_selfcheck.py
+  - bash scripts/check-example-sanitization.sh examples/a0-corpus
+behavior_check: >-
+  COMMAND (Git Bash): python scripts/a0_corpus_preflight_selfcheck.py --case historical-and-preflight-excluded;
+  WATCH: the summary counts only eligible measured Runs, displays zero historical/preflight records counted,
+  and refuses completion until ten completed Runs plus all four declared scenarios are present.
+constraints:
+  - Depends on a0-cap-08-capture-coverage and a0-cap-09-evidence-freeze.
+  - P0 is external to this packet set and must be resolved before A0 collection, not before implementing this synthetic preflight.
+  - Use one frozen validation standard and the post-capture reviewed EXEC_STRONG invocation.
+stop_conditions:
+  - Stop if historical artifacts, preflight refusals, or capture-incomplete Runs can increase the measured completion count.
+output_contract:
+  modified_files: required
+  evidence_bundle: required
+  result_json: required
